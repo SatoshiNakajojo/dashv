@@ -6,8 +6,9 @@
  *   - AUTH_KEY          : secret partagé (doit correspondre à CF_AUTH_KEY côté front)
  *   - GDB_KV            : binding KV namespace
  *   - FMP_API_KEY       : clé API FinancialModelingPrep (SECRET — `wrangler secret put FMP_API_KEY`)
- *   - ANTHROPIC_API_KEY : clé API Anthropic (SECRET) — utilisée UNIQUEMENT côté serveur par
- *                         /screener_scan (recherche par conditions, onglet Tracking)
+ *   - GEMINI_API_KEY    : clé API Google Gemini (SECRET, gratuite sur aistudio.google.com/apikey)
+ *                         — utilisée UNIQUEMENT côté serveur par /screener_scan
+ *                         (recherche par conditions, onglet Tracking)
  *
  * Nouveautés v39 :
  *   - Clé KV `cgi_watchlist` ajoutée dans /read et /write-bases
@@ -2135,15 +2136,16 @@ async function handleRequest(request) {
 
   // ── POST /screener_scan — Recherche par conditions (scan IA du marché mondial) ──
   // Body: { conditions: string[] } (jusqu'à 10 conditions libres, texte).
-  // Appelle Claude (Anthropic, avec recherche web) côté serveur pour proposer des
-  // tickers RÉELS (actions + crypto, marchés mondiaux) correspondant aux conditions.
-  // La clé API n'est JAMAIS exposée au client. La vérification chiffrée des critères
-  // mesurables (% ATH, ancienneté, tendance) est refaite côté app avec de vraies
-  // données Yahoo Finance — cet endpoint ne renvoie qu'une liste de candidats.
+  // Appelle Gemini (Google, avec recherche web via google_search grounding) côté
+  // serveur pour proposer des tickers RÉELS (actions + crypto, marchés mondiaux)
+  // correspondant aux conditions. La clé API n'est JAMAIS exposée au client. La
+  // vérification chiffrée des critères mesurables (% ATH, ancienneté, tendance)
+  // est refaite côté app avec de vraies données Yahoo Finance — cet endpoint ne
+  // renvoie qu'une liste de candidats.
   if (path === "/screener_scan" && request.method === "POST") {
     try {
-      var _sKey = (typeof ANTHROPIC_API_KEY !== "undefined") ? ANTHROPIC_API_KEY : null;
-      if (!_sKey) return json({ ok: false, error: "ANTHROPIC_API_KEY non configurée sur le Worker" }, 500);
+      var _sKey = (typeof GEMINI_API_KEY !== "undefined") ? GEMINI_API_KEY : null;
+      if (!_sKey) return json({ ok: false, error: "GEMINI_API_KEY non configurée sur le Worker" }, 500);
       var sBody = {};
       try { sBody = JSON.parse(await request.text()); } catch (eB) {}
       var sConds = Array.isArray(sBody.conditions)
@@ -2160,25 +2162,26 @@ async function handleRequest(request) {
         + "[{\"ticker\":\"NVDA\",\"yahooSymbol\":\"NVDA\",\"market\":\"stock\",\"name\":\"NVIDIA Corporation\",\"exchange\":\"NASDAQ\",\"country\":\"US\",\"sector\":\"Intelligence artificielle / semi-conducteurs\",\"note\":\"1 phrase expliquant pourquoi ce ticker correspond aux conditions\"}]\n"
         + "Pour une cryptomonnaie : \"market\":\"crypto\" et \"yahooSymbol\" au format \"BTC-USD\".";
 
-      var aResp = await fetch("https://api.anthropic.com/v1/messages", {
+      var _geminiModel = "gemini-2.5-flash";
+      var aResp = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + _geminiModel + ":generateContent", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": _sKey, "anthropic-version": "2023-06-01" },
+        headers: { "Content-Type": "application/json", "x-goog-api-key": _sKey },
         body: JSON.stringify({
-          model: "claude-sonnet-5",
-          max_tokens: 4000,
-          tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 8 }],
-          messages: [{ role: "user", content: sPrompt }],
+          contents: [{ role: "user", parts: [{ text: sPrompt }] }],
+          tools: [{ google_search: {} }],
         }),
         signal: AbortSignal.timeout(55000),
       });
       var aData = await aResp.json();
       if (!aResp.ok) {
         var aErr = (aData && aData.error && aData.error.message) || JSON.stringify(aData).slice(0, 300);
-        return json({ ok: false, error: "Anthropic API " + aResp.status + " : " + aErr }, 502);
+        return json({ ok: false, error: "Gemini API " + aResp.status + " : " + aErr }, 502);
       }
 
       var textOut = "";
-      (aData.content || []).forEach(function (block) { if (block && block.type === "text") textOut += block.text; });
+      var _cand0 = aData.candidates && aData.candidates[0];
+      var _parts = (_cand0 && _cand0.content && _cand0.content.parts) || [];
+      _parts.forEach(function (part) { if (part && typeof part.text === "string") textOut += part.text; });
       var sClean = textOut.replace(/```json/gi, "").replace(/```/g, "").trim();
       var sMatch = sClean.match(/\[[\s\S]*\]/);
       var candidates = [];
