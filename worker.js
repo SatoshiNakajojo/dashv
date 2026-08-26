@@ -2162,7 +2162,7 @@ async function handleRequest(request) {
         + "[{\"ticker\":\"NVDA\",\"yahooSymbol\":\"NVDA\",\"market\":\"stock\",\"name\":\"NVIDIA Corporation\",\"exchange\":\"NASDAQ\",\"country\":\"US\",\"sector\":\"Intelligence artificielle / semi-conducteurs\",\"note\":\"1 phrase expliquant pourquoi ce ticker correspond aux conditions\"}]\n"
         + "Pour une cryptomonnaie : \"market\":\"crypto\" et \"yahooSymbol\" au format \"BTC-USD\".";
 
-      var _geminiModel = "gemini-2.5-flash";
+      var _geminiModel = "gemini-3.6-flash";
       var aResp = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + _geminiModel + ":generateContent", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-goog-api-key": _sKey },
