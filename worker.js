@@ -2136,12 +2136,14 @@ async function handleRequest(request) {
 
   // ── POST /screener_scan — Recherche par conditions (scan IA du marché mondial) ──
   // Body: { conditions: string[] } (jusqu'à 10 conditions libres, texte).
-  // Appelle Gemini (Google, avec recherche web via google_search grounding) côté
-  // serveur pour proposer des tickers RÉELS (actions + crypto, marchés mondiaux)
-  // correspondant aux conditions. La clé API n'est JAMAIS exposée au client. La
-  // vérification chiffrée des critères mesurables (% ATH, ancienneté, tendance)
-  // est refaite côté app avec de vraies données Yahoo Finance — cet endpoint ne
-  // renvoie qu'une liste de candidats.
+  // Appelle Gemini (Google) côté serveur pour proposer, à partir de ses
+  // connaissances, des tickers RÉELS (actions + crypto, marchés mondiaux)
+  // correspondant aux conditions. Pas d'outil de recherche web ici (le grounding
+  // google_search a un quota gratuit trop restreint) — la clé API n'est JAMAIS
+  // exposée au client. La vérification chiffrée des critères mesurables (% ATH,
+  // ancienneté, tendance) est refaite côté app avec de vraies données Yahoo
+  // Finance, qui rattrape aussi les tickers proposés par erreur/radiés — cet
+  // endpoint ne renvoie qu'une liste de candidats.
   if (path === "/screener_scan" && request.method === "POST") {
     try {
       var _sKey = (typeof GEMINI_API_KEY !== "undefined") ? GEMINI_API_KEY : null;
@@ -2156,7 +2158,7 @@ async function handleRequest(request) {
       var condLines = sConds.map(function (c, i) { return (i + 1) + ". " + c; }).join("\n");
       var sPrompt = "Tu es un analyste financier qui aide à découvrir des tickers (actions ET cryptomonnaies, marchés mondiaux — pas seulement américains) correspondant À TOUTES les conditions suivantes :\n\n"
         + condLines + "\n\n"
-        + "Utilise la recherche web pour vérifier que chaque ticker proposé existe RÉELLEMENT, est ACTUELLEMENT coté/tradable, et correspond raisonnablement à l'ensemble des conditions. Pour les conditions chiffrées (prix vs ATH, ancienneté de l'historique, tendance...), une estimation raisonnable suffit : elles seront revérifiées ensuite avec de vraies données de marché.\n"
+        + "Base-toi sur tes connaissances pour proposer des tickers RÉELS, actuellement cotés/tradables, correspondant raisonnablement à l'ensemble des conditions (pas de recherche web disponible ici). Pour les conditions chiffrées (prix vs ATH, ancienneté de l'historique, tendance...), une estimation raisonnable suffit : elles seront revérifiées ensuite avec de vraies données de marché à jour — ne propose donc que des tickers dont tu es raisonnablement sûr qu'ils existent encore.\n"
         + "Propose entre 5 et 12 tickers, aussi divers que possible (pas uniquement des méga-capitalisations déjà évidentes), en évitant les doublons d'un même groupe.\n\n"
         + "Réponds UNIQUEMENT avec un bloc JSON strict (rien avant, rien après), un tableau d'objets avec exactement ces champs :\n"
         + "[{\"ticker\":\"NVDA\",\"yahooSymbol\":\"NVDA\",\"market\":\"stock\",\"name\":\"NVIDIA Corporation\",\"exchange\":\"NASDAQ\",\"country\":\"US\",\"sector\":\"Intelligence artificielle / semi-conducteurs\",\"note\":\"1 phrase expliquant pourquoi ce ticker correspond aux conditions\"}]\n"
@@ -2168,7 +2170,6 @@ async function handleRequest(request) {
         headers: { "Content-Type": "application/json", "x-goog-api-key": _sKey },
         body: JSON.stringify({
           contents: [{ role: "user", parts: [{ text: sPrompt }] }],
-          tools: [{ google_search: {} }],
         }),
         signal: AbortSignal.timeout(55000),
       });
