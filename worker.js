@@ -2290,7 +2290,7 @@ async function handleRequest(request) {
       var sPrompt = "Tu es un analyste financier qui aide à découvrir des tickers (actions ET cryptomonnaies, marchés mondiaux — pas seulement américains) correspondant À TOUTES les conditions suivantes :\n\n"
         + condLines + "\n\n"
         + "Base-toi sur tes connaissances pour proposer des tickers RÉELS, actuellement cotés/tradables, correspondant raisonnablement à l'ensemble des conditions (pas de recherche web disponible ici). Pour les conditions chiffrées (prix vs ATH, ancienneté de l'historique, tendance...), une estimation raisonnable suffit : elles seront revérifiées ensuite avec de vraies données de marché à jour — ne propose donc que des tickers dont tu es raisonnablement sûr qu'ils existent encore.\n"
-        + "Propose entre 5 et 12 tickers, aussi divers que possible (pas uniquement des méga-capitalisations déjà évidentes), en évitant les doublons d'un même groupe.\n\n"
+        + "Propose AU MOINS 25 tickers (30 si tu peux), aussi divers que possible : varie les tailles de capitalisation (méga, grandes, moyennes), les places de cotation (États-Unis, Europe, Asie) et les sous-segments du thème, au lieu de te limiter aux quelques noms les plus évidents. Évite les doublons d'un même groupe. Liste-les du plus pertinent au moins pertinent.\n\n"
         + "Réponds UNIQUEMENT avec un bloc JSON strict (rien avant, rien après), un tableau d'objets avec exactement ces champs :\n"
         + "[{\"ticker\":\"NVDA\",\"yahooSymbol\":\"NVDA\",\"market\":\"stock\",\"name\":\"NVIDIA Corporation\",\"exchange\":\"NASDAQ\",\"country\":\"US\",\"sector\":\"Intelligence artificielle / semi-conducteurs\",\"note\":\"1 phrase expliquant pourquoi ce ticker correspond aux conditions\"}]\n"
         + "Pour une cryptomonnaie : \"market\":\"crypto\" et \"yahooSymbol\" au format \"BTC-USD\".";
@@ -2301,6 +2301,9 @@ async function handleRequest(request) {
         headers: { "Content-Type": "application/json", "x-goog-api-key": _sKey },
         body: JSON.stringify({
           contents: [{ role: "user", parts: [{ text: sPrompt }] }],
+          // 30 candidats × ~8 champs : il faut de la marge, sinon le JSON est tronqué en plein
+          // milieu et le parse échoue (liste vide côté app).
+          generationConfig: { maxOutputTokens: 8192, temperature: 0.9 },
         }),
         signal: AbortSignal.timeout(55000),
       });
@@ -2319,7 +2322,7 @@ async function handleRequest(request) {
       var candidates = [];
       if (sMatch) { try { candidates = JSON.parse(sMatch[0]); } catch (eJ) {} }
       if (!Array.isArray(candidates)) candidates = [];
-      candidates = candidates.filter(function (c) { return c && c.ticker; }).slice(0, 12).map(function (c) {
+      candidates = candidates.filter(function (c) { return c && c.ticker; }).slice(0, 30).map(function (c) {
         return {
           ticker: String(c.ticker).toUpperCase().trim(),
           yahooSymbol: c.yahooSymbol ? String(c.yahooSymbol).trim() : null,
