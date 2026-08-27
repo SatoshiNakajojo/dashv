@@ -780,36 +780,58 @@ async function ibkrSyncPortfolio(purge, dry) {
 //     incluse puis VIDÉE (chaque alerte n'apparaît que dans un seul message).
 //  📰 News — 2 titres récents par position (top 6 par valeur, portefeuille + fonds), via la
 //     recherche Yahoo déjà utilisée par /yahoo-chart. Crypto mappée en -USD.
+// #NEW — Yahoo /search renvoie par PERTINENCE, pas par date : sans tri ni fenêtre de
+// fraîcheur, un vieil article "pertinent" peut remonter en boucle et sembler périmé.
+// On récupère plus large (8), on trie par date décroissante, et on ignore tout ce qui
+// dépasse 96 h.
 async function _digestNewsFor(sym) {
   try {
     // YH est local au handler /yahoo-chart → headers autonomes ici (mêmes essentiels anti-blocage Yahoo)
     var H = { "User-Agent": _UA, "Accept": "application/json, text/plain, */*", "Accept-Language": "en-US,en;q=0.9", "Referer": "https://finance.yahoo.com/" };
     var nUrl = "https://query1.finance.yahoo.com/v1/finance/search?q=" + encodeURIComponent(sym)
-      + "&newsCount=4&quotesCount=0&enableFuzzyQuery=false&lang=en-US";
+      + "&newsCount=8&quotesCount=0&enableFuzzyQuery=false&lang=en-US";
     var nr = await fetch(nUrl, { headers: H });
     if (!nr.ok) { nUrl = nUrl.replace("query1","query2"); nr = await fetch(nUrl, { headers: H }); }
     if (!nr.ok) return [];
     var nd = await nr.json();
-    return (nd && nd.news || []).slice(0, 2).map(function (n) {
-      return { title: n.title || "", publisher: n.publisher || "", url: n.link || "", ts: n.providerPublishTime ? n.providerPublishTime * 1000 : 0 };
+    var items = (nd && nd.news || []).filter(function (n) { return n.title && n.link; }).map(function (n) {
+      return { title: n.title, publisher: n.publisher || "", url: n.link, ts: n.providerPublishTime ? n.providerPublishTime * 1000 : 0 };
     });
+    items.sort(function (a, b) { return (b.ts || 0) - (a.ts || 0); });
+    var cutoff = Date.now() - 96 * 3600 * 1000;
+    items = items.filter(function (n) { return !n.ts || n.ts >= cutoff; });
+    return items.slice(0, 3);
   } catch (e) { return []; }
 }
 function _digestEsc(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+// ── Habillage éditorial du relevé (registre feutré, jamais tape-à-l'œil) ──
+var _DIGEST_RULE = "━━━━━━━━━━━━━━━━━━━━";
+var _DIGEST_MOIS_FR = ["janvier","février","mars","avril","mai","juin","juillet","août","septembre","octobre","novembre","décembre"];
+function _digestFrDate() {
+  var d = new Date(Date.now() + 11 * 3600 * 1000); // même convention horaire (UTC+11) que le reste de l'app
+  return d.getDate() + " " + _DIGEST_MOIS_FR[d.getMonth()] + " " + d.getFullYear();
+}
+function _digestRelTime(ts) {
+  if (!ts) return "";
+  var h = (Date.now() - ts) / 36e5;
+  if (h < 1) return "à l'instant";
+  if (h < 24) return "il y a " + Math.round(h) + " h";
+  return "il y a " + Math.round(h / 24) + " j";
+}
 async function sendHoldingsDigest() {
   var parts = [];
-  // ── 🔔 Alertes en attente (puis purge) ──
+  // ── Alertes en attente (puis purge) ──
   var alerts = [];
   try { var rawA = await GDB_KV.get("cgi_pending_alerts"); if (rawA) alerts = JSON.parse(rawA) || []; } catch (e) {}
   if (alerts.length) {
     var la = alerts.slice(-10).map(function (a) {
-      var arrow = a.kind === "vente" ? "🔺" : "🔻";
-      return arrow + " <b>" + _digestEsc(a.ticker) + "</b> " + (a.kind === "vente" ? "≥" : "≤") + " $" + a.level + " (dernier : $" + (Math.round((a.price || 0) * 100) / 100) + ")";
+      var sens = a.kind === "vente" ? "de vente" : "d'achat";
+      return "▪ <b>" + _digestEsc(a.ticker) + "</b> — seuil " + sens + " franchi à <code>$" + (Math.round((a.price || 0) * 100) / 100) + "</code> <i>(seuil $" + a.level + ")</i>";
     });
-    parts.push("🔔 <b>Alertes déclenchées</b>\n" + la.join("\n"));
+    parts.push("<b>ALERTES DE PRIX</b>\n" + la.join("\n"));
     try { await GDB_KV.put("cgi_pending_alerts", "[]"); } catch (e) {}
   }
-  // ── 📰 News des positions (top 6 par valeur, crypto + actions) ──
+  // ── News des positions (top 6 par valeur, crypto + actions) ──
   try {
     var items = [];
     try { var rawP = await GDB_KV.get("cgi_portfolio"); if (rawP) { var pf = JSON.parse(rawP); items = (pf && pf.items) || []; } } catch (e) {}
@@ -817,22 +839,33 @@ async function sendHoldingsDigest() {
                     .sort(function (a, b) { return (b.val || 0) - (a.val || 0); }).slice(0, 6);
     var yfmap = {}; try { var rawM = await GDB_KV.get("cgi_yfmap"); if (rawM) yfmap = JSON.parse(rawM) || {}; } catch (e) {}
     var CRY = { BTC: 1, ETH: 1, SOL: 1, XRP: 1, ADA: 1, DOGE: 1, BNB: 1, LTC: 1, DOT: 1, AVAX: 1, LINK: 1 };
-    var seenUrl = {}, newsLines = [];
+    // #NEW — dédup PERSISTANTE (inter-jours, via KV) : un article déjà publié dans un
+    // relevé précédent ne revient plus jamais, même si Yahoo le remonte à nouveau demain.
+    var sentSet = {};
+    try { var rawS = await GDB_KV.get("cgi_digest_sent_news"); if (rawS) (JSON.parse(rawS) || []).forEach(function (u) { sentSet[u] = 1; }); } catch (e) {}
+    var newlySent = [], newsBlocks = [];
     for (var i = 0; i < held.length; i++) {
       var t = held[i].t.toUpperCase();
       var sym = yfmap[t] || (CRY[t] || held[i].cat === "Crypto" ? t + "-USD" : t);
       var ns = await _digestNewsFor(sym);
-      var picked = ns.filter(function (n) { if (!n.title || seenUrl[n.url]) return false; seenUrl[n.url] = 1; return true; });
+      var picked = ns.filter(function (n) { return n.url && !sentSet[n.url]; });
       if (picked.length) {
-        newsLines.push("<b>" + _digestEsc(t) + "</b>\n" + picked.map(function (n) {
-          return "· <a href=\"" + n.url + "\">" + _digestEsc(n.title) + "</a>" + (n.publisher ? " <i>(" + _digestEsc(n.publisher) + ")</i>" : "");
+        picked.forEach(function (n) { newlySent.push(n.url); });
+        newsBlocks.push("<b>" + _digestEsc(t) + "</b>\n" + picked.map(function (n) {
+          var rel = _digestRelTime(n.ts);
+          return "· <a href=\"" + n.url + "\">" + _digestEsc(n.title) + "</a>" + (n.publisher || rel ? "  <i>" + [_digestEsc(n.publisher), rel].filter(Boolean).join(" · ") + "</i>" : "");
         }).join("\n"));
       }
     }
-    if (newsLines.length) parts.push("📰 <b>News des positions</b>\n" + newsLines.join("\n"));
+    if (newsBlocks.length) parts.push("<b>ACTUALITÉS DES POSITIONS</b>\n\n" + newsBlocks.join("\n\n"));
+    if (newlySent.length) {
+      try { await GDB_KV.put("cgi_digest_sent_news", JSON.stringify(newlySent.concat(Object.keys(sentSet)).slice(0, 300))); } catch (e) {}
+    }
   } catch (e) {}
   if (!parts.length) return { ok: true, skipped: "rien à envoyer" };
-  return await sendTelegram(parts.join("\n\n"));
+  var header = "🏛 <b>J.C. GLOBAL INVESTMENTS</b>\n<i>Revue quotidienne — " + _digestFrDate() + "</i>\n" + _DIGEST_RULE + "\n\n";
+  var footer = "\n\n" + _DIGEST_RULE + "\n<i>Relevé automatique</i>";
+  return await sendTelegram(header + parts.join("\n\n") + footer);
 }
 
 async function handleScheduled(event) {
