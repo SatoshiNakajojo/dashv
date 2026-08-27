@@ -1,0 +1,46 @@
+name: Deploy Worker to Cloudflare
+
+on:
+  push:
+    branches: [main]
+    paths: ["worker.js"]
+  workflow_dispatch: {}
+
+env:
+  CF_ACCOUNT_ID: e063b172a558680c47d60a40f774883a
+  CF_SCRIPT_NAME: blue-firefly-2075watchlist-api
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate worker.js syntax
+        run: node --check worker.js
+
+      - name: Deploy to Cloudflare Workers
+        run: |
+          cat > metadata.json << 'EOF'
+          {
+            "body_part": "script",
+            "bindings": [
+              {"name":"GDB_KV","type":"kv_namespace","namespace_id":"fd3ceda955f64f93b3d132b7e3ab39d6"},
+              {"name":"KUCOIN_KEY_VERSION","type":"plain_text","text":"2"}
+            ],
+            "compatibility_date": "2026-05-30",
+            "compatibility_flags": []
+          }
+          EOF
+          curl -sS --fail-with-body -X PUT \
+            "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/workers/scripts/${CF_SCRIPT_NAME}" \
+            -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}" \
+            -F "metadata=@metadata.json;type=application/json" \
+            -F "script=@worker.js;type=application/javascript;filename=script" \
+            -o deploy_result.json
+          cat deploy_result.json
+          node -e "
+            const d = require('./deploy_result.json');
+            if (!d.success) { console.error('Deploy failed:', JSON.stringify(d.errors)); process.exit(1); }
+            console.log('Deploy OK — script id:', d.result && d.result.id);
+          "
