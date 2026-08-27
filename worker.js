@@ -169,12 +169,19 @@ async function buildPortfolioNumbers() {
   var fx = await lastPrice("EURUSD=X"); if (fx) eurusd = fx;
   var usdEur = 1 / eurusd;
   var cryptoUSD = 0, stocksUSD = 0, cashUSD = 0, bankEUR = 0, live = 0, fallback = 0;
+  // #NEW — KuCoin isolé du reste du cash : il appartient au fonds CGIC (crypto), alors que
+  // le cash de plateforme (USD/EURO/STRC) appartient à CGIS. Sans cette ventilation, la NAV
+  // par part des deux fonds ne peut pas être recalculée côté Worker.
+  var kucoinUSD = 0, cashOtherUSD = 0;
   var _fxCache = {};
   for (var i = 0; i < items.length; i++) {
     var it = items[i];
     if (it.cat === "Cash Matelas") { bankEUR += (it.valEUR || 0); continue; }
     if (it.cat === "Cash" || ["USD", "EURO", "KUCOIN", "CASH"].indexOf((it.t || "").toUpperCase()) >= 0) {
-      cashUSD += (it.val != null ? it.val : (it.qty || 0)); continue;   // cash $ — poste séparé
+      var _cv = (it.val != null ? it.val : (it.qty || 0));
+      cashUSD += _cv;                                                   // cash $ — poste séparé
+      if ((it.t || "").toUpperCase() === "KUCOIN") kucoinUSD += _cv; else cashOtherUSD += _cv;
+      continue;
     }
     var sym = yfmap[it.t] || (it.cat === "Crypto" ? it.t + "-USD" : it.t);
     var pc = await lastPriceCur(sym);
@@ -189,7 +196,30 @@ async function buildPortfolioNumbers() {
   var bankUSD = Math.round(bankEUR * eurusd);
   var totalUSD = Math.round(cryptoUSD + stocksUSD + cashUSD + bankUSD);
   return { totalUSD: totalUSD, totalEUR: Math.round(totalUSD * usdEur), cryptoUSD: Math.round(cryptoUSD),
-    stocksUSD: Math.round(stocksUSD), cashUSD: Math.round(cashUSD), bankEUR: Math.round(bankEUR), usdEur: usdEur, live: live, fallback: fallback };
+    stocksUSD: Math.round(stocksUSD), cashUSD: Math.round(cashUSD), bankEUR: Math.round(bankEUR), usdEur: usdEur, live: live, fallback: fallback,
+    kucoinUSD: Math.round(kucoinUSD), cashOtherUSD: Math.round(cashOtherUSD) };
+}
+
+// #NEW — Parts et capitaux investis lus DIRECTEMENT depuis cgi_inv (le registre des
+// mouvements de parts, synchronisé en continu par l'app). Avant, ces valeurs ne venaient
+// que de cgi_fund_stats.tsFunds, écrit uniquement par l'onglet JCGI : sans visite de cet
+// onglet, la NAV et le P&L des fonds affichés sur le baromètre restaient figés (constaté :
+// 30 jours de retard). Les lire ici rend le baromètre autonome.
+async function _fundsFromInv() {
+  var inv = null;
+  try { var raw = await GDB_KV.get("cgi_inv"); if (raw) inv = JSON.parse(raw); } catch (e) {}
+  if (!Array.isArray(inv) || !inv.length) return null;
+  var shC = 0, shS = 0, mC = 0, mS = 0;
+  inv.forEach(function (m) {
+    if (!m || !m.fonds) return;
+    var sign = String(m.io || "IN").toUpperCase() === "OUT" ? -1 : 1;
+    var sh = (typeof m.shares === "number") ? m.shares : 0;
+    var mt = (typeof m.montant === "number") ? m.montant : 0;
+    if (m.fonds === "CGIC") { shC += sh; mC += sign * mt; }
+    else if (m.fonds === "CGIS") { shS += sh; mS += sign * mt; }
+  });
+  return { shC: shC > 0 ? shC : null, shS: shS > 0 ? shS : null,
+           mEurC: mC > 0 ? mC : null, mEurS: mS > 0 ? mS : null };
 }
 
 async function buildPortfolioSummary() {
@@ -231,111 +261,153 @@ function _emblem(cx, top, s){ // emblème dessiné (couronne + écu + 3 épis) �
 }
 function barometerSVG(d, aud){
   var invest = (aud==="invest");
-  var W=900, H=1150;
-  var bg="#0B0B0D", ink="#ECE6DA", sub="#8E8678", faint="#585347",
-      gold="#C6A86B", goldDim="#9A8049", hair="#241F18",
-      pos="#86B79C", neg="#C98A8A", cr="#C28E54", st="#7C97BB", ca="#6C6658";
+  // Hauteur ajustée au nombre de lignes de fonds : sans cela, la variante investisseurs
+  // (2 lignes, pas de poste liquidités) laissait un grand vide avant le pied de page.
+  var _caUSD = invest ? 0 : Math.round((d.bankEUR||0)/(d.usdEur||0.92));
+  var _nRows = 2 + ((!invest && _caUSD>0) ? 1 : 0);
+  var W=900, H=1240 - (3-_nRows)*86;
+  // Palette resserrée : encre chaude sur fond nuit, un seul métal (or), accents de performance discrets.
+  var bg="#0A0A0C", ink="#EDE7DB", sub="#8B8375", faint="#565143",
+      gold="#C6A86B", goldDim="#8E7440", hair="#211D16", hair2="#171410",
+      pos="#8FBCA4", neg="#C98A8A", cr="#C08B4F", st="#7891B4", ca="#615C4E";
   var serif="'Cormorant Garamond','Georgia',serif", sans="'Helvetica Neue','Arial',sans-serif";
-  function money(n){ return "$" + Math.round(n||0).toLocaleString("en-US"); }
+  function esc(s){ return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+  function money(n){ return "$" + Math.round(n||0).toLocaleString("en-US").replace(/,/g," "); }
   function pcol(p){ return p==null?sub:(p>=0?pos:neg); }
-  function fp(p){ if(p==null) return "—"; return (p>=0?"+":"\u2212") + Math.abs(p).toFixed(1) + "%"; }
-  function arrow(p){ return p==null?"":(p>=0?"\u25B4":"\u25BE"); }
-  var cr$=d.cryptoUSD||0, st$=d.stocksUSD||0, ca$=invest?0:(Math.round((d.bankEUR||0)/(d.usdEur||0.92)));
+  function fp(p){ if(p==null) return "—"; return (p>=0?"+":"−") + Math.abs(p).toFixed(1) + "%"; }
+  function arrow(p){ return p==null?"":(p>=0?"▴":"▾"); }
+  // Petites capitales espacées : la signature typographique des relevés de banque privée.
+  function label(x,y,t,anchor,size,fill){
+    return '<text x="'+x+'" y="'+y+'" text-anchor="'+(anchor||"middle")+'" fill="'+(fill||sub)
+      +'" font-family="'+sans+'" font-size="'+(size||9.5)+'" letter-spacing="3.4">'+esc(t)+'</text>';
+  }
+  function rule(x1,y,x2,col){ return '<line x1="'+x1+'" y1="'+y+'" x2="'+x2+'" y2="'+y+'" stroke="'+(col||hair)+'"/>'; }
+
+  var cr$=d.cryptoUSD||0, st$=d.stocksUSD||0, ca$=_caUSD;
   var aum = invest ? (cr$+st$) : (d.totalUSD||0);
   var base = (cr$+st$+ca$)||1;
   var wC=cr$/base, wS=st$/base, wA=ca$/base;
   var h=(d&&d.health)||{label:"—",color:gold};
-  var ML=78, MR=W-78, CW=MR-ML;
+  var ML=84, MR=W-84, CW=MR-ML;
   var now=new Date(Date.now()+3600e3), dd=now.toISOString().slice(0,10), hh=now.toISOString().slice(11,16);
+  var MOIS=["janvier","février","mars","avril","mai","juin","juillet","août","septembre","octobre","novembre","décembre"];
+  var dLong = now.getUTCDate()+" "+MOIS[now.getUTCMonth()]+" "+now.getUTCFullYear();
 
   var S='<svg xmlns="http://www.w3.org/2000/svg" width="'+W+'" height="'+H+'" viewBox="0 0 '+W+' '+H+'">';
   S+='<defs>'
    +'<style>@font-face{font-family:"Cormorant Garamond";src:url('+BARO_FONT+') format("truetype");font-weight:400 700;}</style>'
-   +'<radialGradient id="vg" cx="50%" cy="22%" r="90%"><stop offset="0" stop-color="#14121A"/><stop offset="1" stop-color="'+bg+'"/></radialGradient>'
-   +'<linearGradient id="au" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="'+goldDim+'"/><stop offset=".5" stop-color="'+gold+'"/><stop offset="1" stop-color="'+goldDim+'"/></linearGradient>'
+   +'<radialGradient id="vg" cx="50%" cy="16%" r="95%"><stop offset="0" stop-color="#15131A"/><stop offset="1" stop-color="'+bg+'"/></radialGradient>'
+   +'<linearGradient id="au" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="'+bg+'"/><stop offset=".5" stop-color="'+gold+'"/><stop offset="1" stop-color="'+bg+'"/></linearGradient>'
+   +'<linearGradient id="spk" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="'+gold+'" stop-opacity=".22"/><stop offset="1" stop-color="'+gold+'" stop-opacity="0"/></linearGradient>'
    +'</defs>';
   S+='<rect width="'+W+'" height="'+H+'" fill="url(#vg)"/>';
-  S+='<rect x="22" y="22" width="'+(W-44)+'" height="'+(H-44)+'" rx="3" fill="none" stroke="'+hair+'"/>';
-  S+='<rect x="27" y="27" width="'+(W-54)+'" height="'+(H-54)+'" rx="2" fill="none" stroke="#1b1810"/>';
+  // Double filet : le liseré d'un papier à en-tête gravé.
+  S+='<rect x="24" y="24" width="'+(W-48)+'" height="'+(H-48)+'" rx="2" fill="none" stroke="'+hair+'"/>';
+  S+='<rect x="30" y="30" width="'+(W-60)+'" height="'+(H-60)+'" rx="1.5" fill="none" stroke="'+hair2+'"/>';
 
-  // ── En-tête (titre réduit #2.4, logo inchangé) ─────────────────────────────
-  S+='<image href="'+BARO_LOGO+'" x="'+(W/2-52)+'" y="58" width="104" height="82" preserveAspectRatio="xMidYMid meet"/>';
-  S+='<text x="'+(W/2)+'" y="188" text-anchor="middle" fill="'+ink+'" font-family="'+serif+'" font-size="20" letter-spacing="4" font-weight="600">J.C. GLOBAL INVESTMENTS</text>';
-  S+='<text x="'+(W/2)+'" y="212" text-anchor="middle" fill="'+gold+'" font-family="'+sans+'" font-size="11" letter-spacing="6">'+(invest?"RELEVÉ DES PORTEURS DE PARTS":"RELEVÉ DE PATRIMOINE PRIVÉ")+'</text>';
-  S+='<line x1="'+(W/2-30)+'" y1="234" x2="'+(W/2+30)+'" y2="234" stroke="url(#au)" stroke-width="1.3"/>';
+  // ── En-tête ────────────────────────────────────────────────────────────────
+  S+='<image href="'+BARO_LOGO+'" x="'+(W/2-46)+'" y="66" width="92" height="72" preserveAspectRatio="xMidYMid meet"/>';
+  S+='<text x="'+(W/2)+'" y="180" text-anchor="middle" fill="'+ink+'" font-family="'+serif+'" font-size="27" letter-spacing="7" font-weight="600">J.C. GLOBAL INVESTMENTS</text>';
+  S+=label(W/2,204,invest?"RELEVÉ DES PORTEURS DE PARTS":"RELEVÉ DE PATRIMOINE PRIVÉ",null,10,gold);
+  S+='<line x1="'+(W/2-56)+'" y1="224" x2="'+(W/2+56)+'" y2="224" stroke="url(#au)" stroke-width="1"/>';
+  S+='<text x="'+(W/2)+'" y="248" text-anchor="middle" fill="'+faint+'" font-family="'+serif+'" font-size="15" font-style="italic">Arrêté au '+esc(dLong)+'</text>';
 
-  // ── Indice de vitalité ─────────────────────────────────────────────────────
-  var by=262, bw=250, bx=W/2-bw/2;
-  S+='<rect x="'+bx+'" y="'+by+'" width="'+bw+'" height="40" rx="20" fill="none" stroke="'+hair+'"/>';
-  S+='<text x="'+(W/2)+'" y="'+(by+17)+'" text-anchor="middle" fill="'+sub+'" font-family="'+sans+'" font-size="9.5" letter-spacing="3">INDICE DE VITALITÉ</text>';
-  S+='<text x="'+(W/2)+'" y="'+(by+32)+'" text-anchor="middle" fill="'+(h.color||gold)+'" font-family="'+sans+'" font-size="13" letter-spacing="2" font-weight="700">&#9679;&#160;&#160;'+(h.label||"—")+'</text>';
+  // ── Actifs sous gestion — chiffre d'ouverture ──────────────────────────────
+  var uy=300;
+  S+=label(W/2,uy,invest?"ACTIFS DES FONDS SOUS GESTION":"ACTIFS SOUS GESTION",null,10);
+  S+='<text x="'+(W/2)+'" y="'+(uy+52)+'" text-anchor="middle" fill="'+ink+'" font-family="'+serif+'" font-size="54" font-weight="600" letter-spacing="1">'+money(aum)+'</text>';
+  var _ueA=(d.ueApp||d.usdEur||0.92);
+  var _meur=function(x){ return Math.round(x).toString().replace(/\B(?=(\d{3})+(?!\d))/g," ")+" €"; };
+  S+='<text x="'+(W/2)+'" y="'+(uy+76)+'" text-anchor="middle" fill="'+faint+'" font-family="'+sans+'" font-size="12.5" letter-spacing="1.2">&#8776;&#160;'+_meur(aum*_ueA)+'</text>';
+  // Indice de vitalité — pastille sobre, sans cadre
+  S+='<text x="'+(W/2)+'" y="'+(uy+104)+'" text-anchor="middle" font-family="'+sans+'" font-size="10.5" letter-spacing="3.4">'
+    +'<tspan fill="'+(h.color||gold)+'">&#9679;&#160;&#160;</tspan><tspan fill="'+sub+'">'+esc(h.label||"—")+'</tspan></text>';
 
-  // ── Performance (24h / 7j / tendance) ──────────────────────────────────────
-  var py=336;
-  S+='<line x1="'+ML+'" y1="'+py+'" x2="'+MR+'" y2="'+py+'" stroke="'+hair+'"/>';
-  var perf=[["24 HEURES",d.p24],["7 JOURS",d.p7],["TENDANCE (M)",d.M]];
+  // ── Évolution sur 30 jours ─────────────────────────────────────────────────
+  var sy=452, sh=104;
+  var sp=(d.spark||[]).filter(function(v){ return typeof v==="number" && isFinite(v) && v>0; });
+  if(sp.length>=3){
+    var smin=Math.min.apply(null,sp), smax=Math.max.apply(null,sp);
+    if(smin===smax){ smin*=0.995; smax*=1.005; }
+    var sx=function(i){ return ML + i*CW/(sp.length-1); };
+    var syf=function(v){ return sy+sh - (v-smin)/(smax-smin)*(sh-14) - 7; };
+    var pts=sp.map(function(v,i){ return sx(i).toFixed(1)+","+syf(v).toFixed(1); }).join(" ");
+    S+=label(ML,sy-14,"ÉVOLUTION SUR 30 JOURS","start",9.5);
+    S+='<text x="'+MR+'" y="'+(sy-14)+'" text-anchor="end" font-family="'+sans+'" font-size="9.5" letter-spacing="1.4" fill="'+faint+'">'
+      +esc(_meur(smin*_ueA))+' &#8212; '+esc(_meur(smax*_ueA))+'</text>';
+    S+='<polygon points="'+ML+','+(sy+sh)+' '+pts+' '+MR+','+(sy+sh)+'" fill="url(#spk)"/>';
+    S+='<polyline points="'+pts+'" fill="none" stroke="'+gold+'" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>';
+    S+='<circle cx="'+sx(sp.length-1).toFixed(1)+'" cy="'+syf(sp[sp.length-1]).toFixed(1)+'" r="3.2" fill="'+gold+'"/>';
+    S+=rule(ML,sy+sh,MR,hair2);
+  }
+
+  // ── Performance ────────────────────────────────────────────────────────────
+  var py=606;
+  S+=rule(ML,py,MR);
+  var perf=[["24 HEURES",d.p24],["7 JOURS",d.p7],["TENDANCE",d.M]];
   var colW=CW/3;
   perf.forEach(function(c,i){
     var cx=ML+colW*i+colW/2;
-    if(i>0) S+='<line x1="'+(ML+colW*i)+'" y1="'+(py+16)+'" x2="'+(ML+colW*i)+'" y2="'+(py+84)+'" stroke="'+hair+'"/>';
-    S+='<text x="'+cx+'" y="'+(py+40)+'" text-anchor="middle" fill="'+sub+'" font-family="'+sans+'" font-size="10.5" letter-spacing="3">'+c[0]+'</text>';
-    S+='<text x="'+cx+'" y="'+(py+78)+'" text-anchor="middle" fill="'+pcol(c[1])+'" font-family="'+serif+'" font-size="32" font-weight="600">'+fp(c[1])+'</text>';
+    if(i>0) S+='<line x1="'+(ML+colW*i)+'" y1="'+(py+18)+'" x2="'+(ML+colW*i)+'" y2="'+(py+82)+'" stroke="'+hair+'"/>';
+    S+=label(cx,py+38,c[0],null,9.5);
+    S+='<text x="'+cx+'" y="'+(py+76)+'" text-anchor="middle" fill="'+pcol(c[1])+'" font-family="'+serif+'" font-size="34" font-weight="600">'+fp(c[1])+'</text>';
   });
-  S+='<line x1="'+ML+'" y1="'+(py+104)+'" x2="'+MR+'" y2="'+(py+104)+'" stroke="'+hair+'"/>';
+  S+=rule(ML,py+102,MR);
 
-  // ── ALLOCATION DU FONDS — bloc principal/héros (#2.1 en gros, #2.2 renommé) ─
-  var ay=506;
-  S+='<text x="'+(W/2)+'" y="'+ay+'" text-anchor="middle" fill="'+ink+'" font-family="'+serif+'" font-size="30" letter-spacing="3" font-weight="600">'+(invest?"Allocation du fonds":"Allocation du fonds")+'</text>';
-  S+='<text x="'+(W/2)+'" y="'+(ay+24)+'" text-anchor="middle" fill="'+sub+'" font-family="'+sans+'" font-size="10.5" letter-spacing="4">RÉPARTITION DES PÔLES &#183; PART NETTE &amp; PERFORMANCE</text>';
-  var barY=ay+46, barH=18, gap=3;
-  var segs=[[wC,cr],[wS,st]]; if(!invest && wA>0) segs.push([wA,ca]);
+  // ── Les fonds ──────────────────────────────────────────────────────────────
+  var ay=756;
+  S+='<text x="'+(W/2)+'" y="'+ay+'" text-anchor="middle" fill="'+ink+'" font-family="'+serif+'" font-size="30" letter-spacing="2" font-weight="600">Allocation du fonds</text>';
+  S+=label(W/2,ay+24,"RÉPARTITION DES PÔLES · VALEUR DE PART · PERFORMANCE",null,9.5);
+  // Ruban d'allocation : un seul trait épais, segments jointifs, légende sous chaque part
+  var barY=ay+48, barH=10, gap=2.5;
+  var segs=[[wC,cr,"JCGIC"],[wS,st,"JCGIS"]]; if(!invest && wA>0) segs.push([wA,ca,"LIQUIDITÉS"]);
   var x=ML;
   segs.forEach(function(s){ var sw=Math.max(0,(s[0]*CW)-gap);
-    S+='<rect x="'+x.toFixed(1)+'" y="'+barY+'" width="'+sw.toFixed(1)+'" height="'+barH+'" rx="3" fill="'+s[1]+'"/>';
+    S+='<rect x="'+x.toFixed(1)+'" y="'+barY+'" width="'+sw.toFixed(1)+'" height="'+barH+'" rx="1.5" fill="'+s[1]+'"/>';
+    if(s[0]>0.07) S+='<text x="'+(x+sw/2).toFixed(1)+'" y="'+(barY+26)+'" text-anchor="middle" fill="'+faint+'" font-family="'+sans+'" font-size="9.5" letter-spacing="1.6">'+Math.round(s[0]*100)+'%</text>';
     x+=s[0]*CW; });
+
   var rows=[["JCGIC","Pôle numérique",cr,cr$,wC,d.cgicNavUSD,d.cgicPnl,d.cgicNav]];
   rows.push(["JCGIS","Pôle actions",st,st$,wS,d.cgisNavUSD,d.cgisPnl,d.cgisNav]);
   if(!invest && ca$>0) rows.push(["LIQUIDITÉS","Matelas de sécurité",ca,ca$,wA,null,null,null]);
-  var ry=barY+barH+50;
+  var ry=barY+64;
   rows.forEach(function(r,i){
-    var y=ry+i*74, hasNav=(r[5]!=null);
-    S+='<circle cx="'+(ML+6)+'" cy="'+(y-5)+'" r="6" fill="'+r[2]+'"/>';
-    S+='<text x="'+(ML+26)+'" y="'+y+'" fill="'+ink+'" font-family="'+sans+'" font-size="17" letter-spacing="2" font-weight="600">'+r[0]+'</text>';
-    S+='<text x="'+(ML+26)+'" y="'+(y+19)+'" fill="'+faint+'" font-family="'+sans+'" font-size="11.5" letter-spacing="1">'+r[1]+'</text>';
+    var y=ry+i*86, hasNav=(r[5]!=null);
+    S+=rule(ML,y-26,MR,hair2);
+    S+='<rect x="'+ML+'" y="'+(y-11)+'" width="3" height="14" fill="'+r[2]+'"/>';
+    S+='<text x="'+(ML+16)+'" y="'+y+'" fill="'+ink+'" font-family="'+sans+'" font-size="15" letter-spacing="2.6" font-weight="600">'+esc(r[0])+'</text>';
+    S+='<text x="'+(ML+16)+'" y="'+(y+20)+'" fill="'+faint+'" font-family="'+serif+'" font-size="15" font-style="italic">'+esc(r[1])+'</text>';
     if(hasNav){
-      S+='<text x="'+MR+'" y="'+y+'" text-anchor="end" fill="'+gold+'" font-family="'+serif+'" font-size="30" font-weight="600">'+r[5].toFixed(2)+' $<tspan font-family="'+sans+'" font-size="12" fill="'+sub+'" font-weight="400"> /part</tspan></text>';
-      var sub2=(r[7]!=null?'<tspan fill="'+faint+'">&#8776;&#160;'+r[7].toFixed(2)+'&#160;\u20AC&#160;&#160;&#183;&#160;&#160;</tspan>':'')+'<tspan fill="'+sub+'">'+money(r[3])+'</tspan><tspan fill="'+faint+'">&#160;&#160;&#183;&#160;&#160;'+Math.round(r[4]*100)+'% du fonds</tspan>';
-      if(r[6]!=null) sub2+='<tspan fill="'+faint+'">&#160;&#160;&#183;&#160;&#160;P&amp;L depuis l\'origine&#160;&#160;</tspan><tspan fill="'+pcol(r[6])+'" font-weight="700">'+fp(r[6])+'</tspan>';
-      S+='<text x="'+MR+'" y="'+(y+20)+'" xml:space="preserve" text-anchor="end" font-family="'+sans+'" font-size="12" letter-spacing="0.3">'+sub2+'</text>';
+      // Valeur liquidative : le chiffre que le porteur de parts vient chercher.
+      S+='<text x="'+MR+'" y="'+y+'" text-anchor="end" fill="'+gold+'" font-family="'+serif+'" font-size="34" font-weight="600">'+r[5].toFixed(2)
+        +'<tspan font-family="'+sans+'" font-size="11.5" fill="'+sub+'" font-weight="400" letter-spacing="1.4"> $ / PART</tspan></text>';
+      var bits=[];
+      if(r[7]!=null) bits.push('<tspan fill="'+faint+'">'+r[7].toFixed(2)+'&#160;€</tspan>');
+      bits.push('<tspan fill="'+sub+'">'+money(r[3])+'</tspan>');
+      bits.push('<tspan fill="'+faint+'">'+Math.round(r[4]*100)+'%&#160;du fonds</tspan>');
+      S+='<text x="'+MR+'" y="'+(y+20)+'" xml:space="preserve" text-anchor="end" font-family="'+sans+'" font-size="11.5" letter-spacing="0.4">'
+        +bits.join('<tspan fill="'+hair+'">&#160;&#160;|&#160;&#160;</tspan>')+'</text>';
+      if(r[6]!=null){
+        S+='<text x="'+MR+'" y="'+(y+40)+'" xml:space="preserve" text-anchor="end" font-family="'+sans+'" font-size="11.5" letter-spacing="0.4">'
+          +'<tspan fill="'+faint+'">Depuis l\'origine&#160;&#160;</tspan><tspan fill="'+pcol(r[6])+'" font-weight="700">'+fp(r[6])+'</tspan></text>';
+      }
     } else {
-      S+='<text x="'+MR+'" y="'+y+'" text-anchor="end" fill="'+gold+'" font-family="'+serif+'" font-size="30" font-weight="600">'+money(r[3])+'</text>';
-      S+='<text x="'+MR+'" y="'+(y+20)+'" text-anchor="end" fill="'+sub+'" font-family="'+sans+'" font-size="12" letter-spacing="0.3">'+Math.round(r[4]*100)+'% du total</text>';
+      S+='<text x="'+MR+'" y="'+y+'" text-anchor="end" fill="'+gold+'" font-family="'+serif+'" font-size="34" font-weight="600">'+money(r[3])+'</text>';
+      S+='<text x="'+MR+'" y="'+(y+20)+'" text-anchor="end" fill="'+faint+'" font-family="'+sans+'" font-size="11.5" letter-spacing="0.4">'+Math.round(r[4]*100)+'% du total</text>';
     }
-    if(i<rows.length-1) S+='<line x1="'+ML+'" y1="'+(y+40)+'" x2="'+MR+'" y2="'+(y+40)+'" stroke="'+hair+'"/>';
   });
 
-  // ── Actifs sous gestion — discret, en bas (#2.1) ───────────────────────────
-  var uy=852;
-  S+='<line x1="'+ML+'" y1="'+uy+'" x2="'+MR+'" y2="'+uy+'" stroke="'+hair+'"/>';
-  S+='<text x="'+(W/2)+'" y="'+(uy+30)+'" text-anchor="middle" fill="'+sub+'" font-family="'+sans+'" font-size="10.5" letter-spacing="5">'+(invest?"ACTIFS DES FONDS SOUS GESTION":"ACTIFS SOUS GESTION")+'</text>';
-  S+='<text x="'+(W/2)+'" y="'+(uy+64)+'" text-anchor="middle" fill="'+ink+'" font-family="'+serif+'" font-size="30" font-weight="600" letter-spacing="1">'+money(aum)+'</text>';
-  var _ueA=(d.ueApp||d.usdEur||0.92);
-  var _meur=function(x){ return Math.round(x).toString().replace(/\B(?=(\d{3})+(?!\d))/g,"\u202F")+" \u20AC"; };
-  S+='<text x="'+(W/2)+'" y="'+(uy+84)+'" text-anchor="middle" fill="'+faint+'" font-family="'+sans+'" font-size="12.5" letter-spacing="1">&#8776;&#160;'+_meur(aum*_ueA)+'</text>';
-  var chg=d.p7;
-  S+='<text x="'+(W/2)+'" y="'+(uy+106)+'" text-anchor="middle" fill="'+pcol(chg)+'" font-family="'+sans+'" font-size="12" letter-spacing="1">'+arrow(chg)+'&#160;&#160;'+fp(chg)+'&#160;&#160;<tspan fill="'+faint+'">sur 7 jours</tspan></text>';
-
-  // ── Pied de page (mentions légales) ────────────────────────────────────────
-  var fy=H-130;
-  S+='<line x1="'+ML+'" y1="'+fy+'" x2="'+MR+'" y2="'+fy+'" stroke="'+hair+'"/>';
-  S+='<text x="'+(W/2)+'" y="'+(fy+24)+'" text-anchor="middle" fill="'+faint+'" font-family="'+sans+'" font-size="11" font-style="italic" letter-spacing="1">Établi le '+dd+' à '+hh+' CET · Document confidentiel</text>';
+  // ── Pied de page ───────────────────────────────────────────────────────────
+  var fy=H-124;
+  S+=rule(ML,fy,MR);
+  S+='<text x="'+(W/2)+'" y="'+(fy+26)+'" text-anchor="middle" fill="'+faint+'" font-family="'+serif+'" font-size="14" font-style="italic">Établi le '+dd+' à '+hh+' CET &#183; Document confidentiel</text>';
   var foot = invest
     ? "Relevé destiné aux porteurs de parts des fonds JCGIC & JCGIS. Document indicatif sans valeur contractuelle. Les performances passées ne préjugent pas des performances futures."
     : "Véhicule patrimonial privé. Relevé strictement confidentiel, sans valeur contractuelle ni conseil en investissement. Les performances passées ne préjugent pas des performances futures.";
   var words=foot.split(" "), lns=[], cur="";
-  words.forEach(function(wd){ if((cur+" "+wd).length>92){ lns.push(cur); cur=wd; } else cur=(cur?cur+" ":"")+wd; });
+  words.forEach(function(wd){ if((cur+" "+wd).length>96){ lns.push(cur); cur=wd; } else cur=(cur?cur+" ":"")+wd; });
   if(cur) lns.push(cur);
-  lns.slice(0,3).forEach(function(l,i){ S+='<text x="'+(W/2)+'" y="'+(fy+50+i*17)+'" text-anchor="middle" fill="'+faint+'" font-family="'+sans+'" font-size="10.5">'+l.replace(/&/g,"&amp;")+'</text>'; });
+  lns.slice(0,3).forEach(function(l,i){ S+='<text x="'+(W/2)+'" y="'+(fy+52+i*16)+'" text-anchor="middle" fill="'+faint+'" font-family="'+sans+'" font-size="10">'+esc(l)+'</text>'; });
   S+='</svg>';
   return S;
 }
@@ -433,9 +505,35 @@ async function buildBaroData() {
     if (snap.cgis.mEUR > 0) cgisPnl = (n.stocksUSD * n.usdEur / snap.cgis.mEUR - 1) * 100;
     else if (snap.cgis.pnlPct != null) cgisPnl = snap.cgis.pnlPct;
   }
+  // #NEW — CALCUL AUTONOME (prioritaire quand les prix live sont disponibles) : NAV et P&L des
+  // fonds recalculés ici à partir des pôles live et de cgi_inv, au lieu d'être dérivés d'un
+  // cgi_fund_stats que seul l'onglet JCGI rafraîchit. Périmètres identiques à l'app :
+  //   CGIC = crypto + KuCoin    ·    CGIS = actions + cash de plateforme (hors matelas bancaire)
+  var fundsSrc = "snapshot";
+  try {
+    if (liveOk) {
+      var fi = await _fundsFromInv();
+      var shC2 = (fi && fi.shC) || (snap && snap.cgic && snap.cgic.sh > 0 ? snap.cgic.sh : PARTS.C);
+      var shS2 = (fi && fi.shS) || (snap && snap.cgis && snap.cgis.sh > 0 ? snap.cgis.sh : PARTS.S);
+      var mC2 = (fi && fi.mEurC) || (snap && snap.cgic && snap.cgic.mEUR) || null;
+      var mS2 = (fi && fi.mEurS) || (snap && snap.cgis && snap.cgis.mEUR) || null;
+      var fundCusd = n.cryptoUSD + (n.kucoinUSD || 0);
+      var fundSusd = n.stocksUSD + (n.cashOtherUSD || 0);
+      if (shC2 > 0 && fundCusd > 0) {
+        cgicNavUSD = fundCusd / shC2; cgicNav = cgicNavUSD * n.usdEur;
+        if (mC2 > 0) cgicPnl = (fundCusd * n.usdEur / mC2 - 1) * 100;
+      }
+      if (shS2 > 0 && fundSusd > 0) {
+        cgisNavUSD = fundSusd / shS2; cgisNav = cgisNavUSD * n.usdEur;
+        if (mS2 > 0) cgisPnl = (fundSusd * n.usdEur / mS2 - 1) * 100;
+      }
+      fundsSrc = fi ? "live+inv" : "live";
+    }
+  } catch (e) {}
   return Object.assign(n, { pMaj: pMaj, p24: p24, p7: p7, M: M, health: _healthFromM(M),
     cgicNav: cgicNav, cgisNav: cgisNav, cgicPnl: cgicPnl, cgisPnl: cgisPnl,
-    cgicNavUSD: cgicNavUSD, cgisNavUSD: cgisNavUSD, ueApp: ueApp });
+    cgicNavUSD: cgicNavUSD, cgisNavUSD: cgisNavUSD, ueApp: ueApp, fundsSrc: fundsSrc,
+    spark: hist.map(function (h) { return h.v; }) });
 }
 
 // URL publique du Worker (pour que wsrv.nl récupère le SVG)
