@@ -27,6 +27,72 @@ const CORS_HEADERS = {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
+//  MANUEL D'ANALYSE FONDAMENTALE J.C. GLOBAL INVESTMENTS
+//  Transcription de la méthodologie interne (« Manuel intégral d'analyse
+//  fondamentale — Méthodologies institutionnelles, modélisation avancée et
+//  détection des risques », 23 p.). Les seuils chiffrés sont ceux du document :
+//  ils ne doivent pas être « arrondis » par le modèle, c'est tout l'intérêt.
+// ════════════════════════════════════════════════════════════════════════════
+var JCGI_MANUEL = [
+"MANUEL D'ANALYSE FONDAMENTALE — J.C. GLOBAL INVESTMENTS (socle d'exécution OBLIGATOIRE).",
+"Principe directeur : l'objectif n'est pas de prédire l'avenir, mais d'identifier les ASYMÉTRIES FAVORABLES où la valeur intrinsèque excède largement le prix de marché — la MARGE DE SÉCURITÉ. Le risque n'est pas la volatilité : c'est la probabilité de perte permanente et irréversible du capital.",
+"",
+"1. MACROÉCONOMIE — LE FILTRE TOP-DOWN (à appliquer AVANT toute analyse d'entreprise).",
+"- Taux sans risque (T-Bills 10 ans) = gravité sur les valorisations. Taux élevé => WACC élevé => valeur présente des flux futurs diminuée, contraction des multiples (PER, EV/EBITDA) indépendamment de l'opérationnel. Les actifs à duration longue (croissance) souffrent le plus.",
+"- Prime de risque actions (ERP) : si elle se comprime face à des obligations attractives, les capitaux fuient les actions.",
+"- Courbe des taux : une INVERSION (2 ans > 10 ans) est un indicateur avancé puissant de récession. Face à ce signal : privilégier les secteurs défensifs (Santé, Consommation de base), réduire l'exposition aux cycliques industrielles.",
+"- Inflation : au-dessus de 4 % d'IPC, test de résistance impitoyable du PRICING POWER. Pricing Power absolu = capacité à monter les prix SANS perte de volumes (monopoles locaux, luxe fort, logiciels critiques). Attention à l'ILLUSION DU CHIFFRE D'AFFAIRES : des revenus dopés par l'inflation peuvent masquer une destruction de marge opérationnelle.",
+"- Liquidité : le QE gonfle les actifs risqués, le QT draine la liquidité et révèle les bilans fragiles.",
+"",
+"2. QUALITÉ COMPTABLE & RED FLAGS — le bénéfice est une opinion, le cash-flow est un fait.",
+"- PIOTROSKI F-SCORE (0 à 9) : > 7 EXCELLENT, < 3 graves détériorations. Ses 9 critères : ROA positif ; Operating Cash Flow positif ; ROA en amélioration (N > N-1) ; OCF > Résultat Net ; baisse du ratio Dette/Actifs ; hausse du Current Ratio ; AUCUNE émission d'actions (pas de dilution) ; hausse de la marge brute ; hausse de la rotation des actifs.",
+"- ALTMAN Z-SCORE = 1.2*X1 + 1.4*X2 + 3.3*X3 + 0.6*X4 + 1.0*X5, avec X1 = fonds de roulement/actif total, X2 = résultats reportés/actif total, X3 = EBIT/actif total, X4 = capitalisation/total des dettes, X5 = ventes/actif total. Lecture : Z > 3.0 zone de sécurité ; 1.8 < Z < 3.0 zone grise, vigilance ; Z < 1.8 zone de détresse, risque majeur de banqueroute sous 24 mois.",
+"- RED FLAG ULTIME — divergence de flux : si le bénéfice net monte trimestre après trimestre alors que l'OCF stagne ou baisse, probabilité CRITIQUE de manipulation comptable (reconnaissance agressive des revenus, channel stuffing, créances clients anormales, capitalisation de charges opérationnelles).",
+"- DILUTION PAR SBC : le paiement en actions est un coût réel. Une société versant 12 % de sa capitalisation par an en actions doit croître d'au moins 12 % rien que pour que le cours reste plat. Toujours DÉDUIRE le SBC du Free Cash Flow ; sans cet ajustement les marges de cash des sociétés technologiques sont grossièrement surestimées.",
+"",
+"3. LIQUIDITÉ, SOLVABILITÉ & CYCLE DE CONVERSION DU CASH.",
+"- Current Ratio = actifs circulants / passifs circulants : idéalement > 1.5 ; < 1 signifie des dettes court terme non couvertes par des actifs liquides.",
+"- Quick Ratio = (actifs circulants - stocks) / passifs circulants : test de résistance ultime, > 1 est le standard d'une gestion prudente.",
+"- Interest Coverage = EBIT / charges d'intérêts : < 3 = très vulnérable à une hausse des taux ou une baisse de marge ; 5 à 10 = excellente marge de sécurité.",
+"- Dette nette / EBITDA : viser < 3x (sauf infrastructures et immobilier, aux revenus très prédictibles).",
+"- CCC = DIO + DSO - DPO. Un DSO qui s'allonge est un signe de faiblesse. LE GRAAL : un CCC NÉGATIF (Amazon, Apple) — les fournisseurs financent gratuitement la croissance, aucune dette ni dilution nécessaire pour financer l'expansion.",
+"",
+"4. RENTABILITÉ ET CRÉATION DE VALEUR (BOTTOM-UP) — jamais de rentabilité sans le capital employé pour la produire.",
+"- ROIC = NOPAT / capital investi : métrique REINE. Un ROIC soutenu > 15 % sur PLUSIEURS ANNÉES est la marque indéniable d'un moat.",
+"- ROCE = EBIT / (total actifs - passifs courants) : les institutionnels exigent > 20 % structurellement pour justifier des multiples premium.",
+"- SPREAD ÉCONOMIQUE : la valeur n'est créée que si ROIC > WACC. Si ROIC < WACC, chaque euro investi dans la croissance DÉTRUIT de la valeur (croissance destructrice).",
+"- ARBRE DE DUPONT : ROE = marge nette x rotation des actifs x multiplicateur de levier. Si le ROE n'est gonflé que par le levier, le profil de risque est INACCEPTABLE.",
+"- SHAREHOLDER YIELD = (dividendes + rachats nets d'actions + réduction nette de dette) / capitalisation. Le seul dividende est une métrique obsolète : 2 % de dividende + 5.5 % de rachats = 7.5 %, bien mieux qu'un « haut dividende » dont le capital se dilue.",
+"",
+"5. VALORISATION INSTITUTIONNELLE.",
+"- DCF : la valeur terminale pèse souvent plus de 70 % du modèle, d'où son extrême sensibilité. RÈGLE INTERNE : toujours 3 scénarios (pessimiste, base, optimiste), jamais un prix cible unique illusoire.",
+"- REVERSE DCF (outil préféré) : partir du cours actuel et extraire les HYPOTHÈSES IMPLICITES du marché. Question centrale : quelle croissance du FCF et quelles marges l'entreprise doit-elle réaliser sur 10 ans pour justifier exactement son cours d'aujourd'hui ? Si le marché price 30 % par an sur 10 ans dans un TAM déjà saturé, le titre est mathématiquement surévalué.",
+"- SOTP : pour les conglomérats, valoriser chaque division à son multiple sectoriel puis retrancher la dette holding. Révèle les candidats aux spin-offs, catalyseurs puissants.",
+"- LBO : une société à FCF massifs, prévisibles et récurrents, bilan sain, s'échangeant à EV/FCF < 10 est une cible idéale de rachat privé — forte probabilité d'OPA avec prime de 30 % à 50 %. Cela définit le PLANCHER de valorisation.",
+"- Multiples : EV/FCF et EV/EBITDA sont infiniment supérieurs au PER, car la valeur d'entreprise intègre la structure du capital. À PER égal, la société à trésorerie nette est bien moins chère et moins risquée que celle criblée de dettes.",
+"",
+"6. CAPITAUX INTANGIBLES ET MOATS — les actifs les plus précieux ne figurent pas au bilan.",
+"- Effet de réseau : distinguer LOCAL (Uber : liquidité par ville, disruptable géographiquement) et GLOBAL (Meta, Visa, Airbnb : quasi-monopole impossible à déloger).",
+"- Coûts de changement : logiciels B2B (Salesforce, ServiceNow), systèmes d'exploitation (Apple). L'inertie client assure des revenus récurrents massifs.",
+"- Avantage de coût et TAILLE EFFICIENTE : marchés de niche où un ou deux acteurs suffisent (oléoducs, infrastructures aéroportuaires) — entrer détruirait la rentabilité de tous.",
+"- Actifs intangibles protégés : marques à pricing power absolu (Hermès, Ferrari), brevets pharmaceutiques, agréments réglementaires quasi inaccessibles.",
+"- CAPEX : scinder MAINTENANCE (obligatoire) et CROISSANCE (discrétionnaire). Le Steady-State FCF ne retranche de l'OCF que le capex de MAINTENANCE : une société peut sembler brûler du cash alors qu'elle investit massivement et profitablement.",
+"- CYCLE DE VIE — appliquer les mêmes métriques à toutes les sociétés est une erreur d'amateur : (1) Lancement : cash burn, FCF négatif, juger sur utilisateurs/TAM/parts de marché, valoriser en EV/Sales. (2) Hyper-croissance : FCF souvent négatif mais dérivée seconde positive, levier opérationnel. (3) Maturité : machine à cash, FCF maximal, dividendes et rachats, valoriser en EV/FCF et P/E. (4) Déclin : contraction des revenus, danger de VALUE TRAP derrière un PER artificiellement bas.",
+"",
+"7. SECTEUR ET DYNAMIQUES CONCURRENTIELLES — une excellente société dans un secteur structurellement détérioré finira par souffrir.",
+"- 5 FORCES DE PORTER : hauteur des barrières à l'entrée ; pouvoir des fournisseurs (dépendance à un oligopole critique, ex. fonderies TSMC) ; pouvoir des clients (un client à 40 % du CA érode la marge ; la fragmentation est préférable) ; menace de substitution (rupture technologique, substitution indirecte) ; intensité de la rivalité (un oligopole d'acteurs rationnels est hautement profitable, une industrie fragmentée en guerre des prix détruit le capital).",
+"- PESTEL : le risque RÉGLEMENTAIRE (légal/politique) est le plus asymétrique — une loi antitrust, une fiscalité sectorielle ou un embargo peuvent anéantir un DCF en une nuit.",
+"",
+"8. ALLOCATION, DIRECTION ET RISQUES.",
+"- SKIN IN THE GAME : un dirigeant fondateur détenant une part significative du capital (au-delà des options gratuites) est naturellement aligné avec l'actionnaire minoritaire.",
+"- INSIDER BUYING : signal fondamental puissant. Les initiés vendent pour mille raisons, ils n'achètent que pour une seule — ils pensent que le prix va monter.",
+"- TRACK RECORD M&A : les fusions-acquisitions détruisent de la valeur dans plus de 60 % des cas. Un management adepte d'acquisitions relutives (bolt-on) à multiples raisonnables est rare et précieux.",
+"- CATALYSEURS DE RÉÉVALUATION : sans catalyseur, une action sous-évaluée peut le rester indéfiniment (value trap). À surveiller : fonds activiste forçant un remaniement du conseil, spin-off annoncé, programme agressif de rachat d'actions, changement réglementaire ouvrant brutalement un marché.",
+"",
+"CONCLUSION : le quantitatif (bilans, ROIC, multiples) fournit le squelette ; le qualitatif (moat, gouvernance, résilience macro) donne la vie au modèle. La discipline d'application de ces filtres est le garant de la performance asymétrique."
+].join("\n");
+
+// ════════════════════════════════════════════════════════════════════════════
 //  GEMINI — choix du modèle, tolérant aux retraits
 //  Google retire ses modèles sans préavis pour les nouvelles clés : c'est déjà
 //  arrivé une fois (gemini-2.5-flash), et un identifiant figé fait tomber tout
@@ -2445,6 +2511,115 @@ async function handleRequest(request) {
       reponseTest: _dTxt || null,
       erreur: _dg.ok ? null : _dg.error,
     });
+  }
+
+  // ── POST /screener_verdict — VERDICT FONDAMENTAL (agent) ──────────────────
+  // Ce n'est pas un filtre de plus : c'est un raisonnement. On donne au modèle
+  // l'INTÉGRALITÉ du manuel d'analyse fondamentale JCGI et la sélection déjà
+  // établie par le scan, et on lui demande d'instruire chaque dossier pilier par
+  // pilier, puis de désigner la ou les meilleures entreprises.
+  // On ne bride PAS la réflexion ici (contrairement au scan) : c'est justement
+  // ce qu'on achète. La chaîne de repli s'en charge si un modèle la refuse.
+  if (path === "/screener_verdict" && request.method === "POST") {
+    try {
+      var _vKey = (typeof GEMINI_API_KEY !== "undefined") ? GEMINI_API_KEY : null;
+      if (!_vKey) return json({ ok: false, error: "GEMINI_API_KEY non configurée sur le Worker" }, 500);
+      var vBody = {};
+      try { vBody = JSON.parse(await request.text()); } catch (eV) {}
+      var vCands = Array.isArray(vBody.candidates) ? vBody.candidates : [];
+      var vConds = Array.isArray(vBody.conditions) ? vBody.conditions.map(function (c) { return String(c || "").trim(); }).filter(Boolean) : [];
+      // Le manuel traite d'ANALYSE FONDAMENTALE D'ENTREPRISES : les cryptos n'ont
+      // ni bilan, ni ROIC, ni Piotroski. On les écarte explicitement plutôt que de
+      // laisser le modèle inventer des états financiers.
+      var vCrypto = vCands.filter(function (c) { return c && c.market === "crypto"; })
+        .map(function (c) { return String(c.ticker || "").toUpperCase(); });
+      var vStocks = vCands.filter(function (c) { return c && c.ticker && c.market !== "crypto"; }).slice(0, 12);
+      if (!vStocks.length) {
+        return json({ ok: false, error: "Aucune action à analyser (le manuel ne s'applique pas aux cryptomonnaies).", ecartesCrypto: vCrypto }, 400);
+      }
+
+      // Ce que l'app a DÉJÀ mesuré sur de vraies données Yahoo est transmis au
+      // modèle : c'est le seul socle chiffré certain dont il dispose.
+      var vLignes = vStocks.map(function (c, i) {
+        var bits = [(i + 1) + ". " + c.ticker + (c.name ? " — " + c.name : "")];
+        if (c.exchange || c.country) bits.push("place : " + [c.exchange, c.country].filter(Boolean).join(", "));
+        if (c.sector) bits.push("secteur : " + c.sector);
+        if (c.stats) {
+          var st = c.stats;
+          if (st.price != null) bits.push("cours : " + st.price);
+          if (st.pctFromAth != null) bits.push("écart à l'ATH : " + st.pctFromAth + "%");
+          if (st.years != null) bits.push("historique coté : " + st.years + " ans");
+          if (st.uptrend != null) bits.push("tendance hebdo depuis la création : " + (st.uptrend ? "haussière" : "non haussière"));
+        }
+        if (c.note) bits.push("motif du scan : " + c.note);
+        return bits.join(" | ");
+      }).join("\n");
+
+      var vPrompt = JCGI_MANUEL + "\n\n"
+        + "════════════════════════════════════════\n"
+        + "MISSION\n"
+        + "Tu es l'analyste fondamental de J.C. Global Investments. Le manuel ci-dessus est ton socle d'exécution OBLIGATOIRE : tu dois l'appliquer INTÉGRALEMENT, pilier par pilier, sans en sauter aucun.\n\n"
+        + "Un premier scan a déjà retenu la sélection ci-dessous à partir des conditions de recherche de l'investisseur"
+        + (vConds.length ? " :\n" + vConds.map(function (c, i) { return "  - " + c; }).join("\n") : ".")
+        + "\n\nSÉLECTION À INSTRUIRE (" + vStocks.length + " sociétés) :\n" + vLignes + "\n\n"
+        + (vCrypto.length ? "Écartées d'office car hors périmètre du manuel (pas de bilan, pas de Piotroski, pas de ROIC) : " + vCrypto.join(", ") + ".\n\n" : "")
+        + "TRAVAIL DEMANDÉ\n"
+        + "1. Poser d'abord la lecture MACRO (pilier 1) du régime actuel : taux, pente de la courbe, inflation, cycle de liquidité — et ce qu'elle implique pour ces dossiers (duration longue pénalisée ? défensives à privilégier ?).\n"
+        + "2. Pour CHAQUE société, instruire les piliers 2 à 8 : qualité comptable (Piotroski estimé sur 9, Altman Z estimé, divergence résultat net/OCF, dilution SBC), liquidité et solvabilité (current et quick ratio, couverture des intérêts, dette nette/EBITDA, CCC), rentabilité (ROIC vs 15 %, ROCE vs 20 %, spread ROIC-WACC, DuPont, shareholder yield), valorisation (EV/FCF, et surtout REVERSE DCF : quelle croissance le cours actuel exige-t-il, et est-elle plausible au vu du TAM ?), moat (type précis et durabilité), secteur (Porter, PESTEL, risque réglementaire), direction (skin in the game, insider buying, track record M&A) et catalyseurs.\n"
+        + "3. Calibrer selon la PHASE DU CYCLE DE VIE de chaque société : ne pas juger une hyper-croissance au FCF comme une société mature.\n"
+        + "4. Conclure en désignant la ou les MEILLEURES entreprises (1 à 3 maximum) — celles offrant la plus forte ASYMÉTRIE et une véritable MARGE DE SÉCURITÉ. Écarter explicitement les value traps et tout dossier portant un red flag comptable.\n\n"
+        + "HONNÊTETÉ INTELLECTUELLE — RÈGLE ABSOLUE\n"
+        + "Tu n'as PAS accès aux états financiers en temps réel. Tes chiffres sont des ESTIMATIONS issues de tes connaissances, potentiellement périmées. Tu dois donc : marquer chaque valeur estimée d'un « ~ » ; renseigner honnêtement le champ \"confiance\" ; et lister dans \"aVerifier\" les chiffres précis que l'investisseur doit contrôler sur les derniers états financiers avant d'engager le moindre capital. N'invente JAMAIS un chiffre en le présentant comme certain. Si un dossier t'est trop peu connu pour être instruit, dis-le dans \"confiance\": \"faible\" plutôt que de broder.\n\n"
+        + "RÉPONDS UNIQUEMENT avec ce JSON strict (rien avant, rien après) :\n"
+        + "{\n"
+        + '  "macro": "3 à 5 phrases : régime de taux, courbe, inflation, liquidité, et implication pour cette sélection",\n'
+        + '  "classement": [\n'
+        + "    {\n"
+        + '      "ticker": "NVDA", "nom": "NVIDIA Corporation", "rang": 1,\n'
+        + '      "scoreGlobal": 82,\n'
+        + '      "piliers": {"qualiteComptable": 8, "liquidite": 7, "rentabilite": 9, "valorisation": 4, "moat": 9, "secteur": 7, "direction": 8},\n'
+        + '      "piotroski": "~7/9", "altmanZ": "~5.2 (zone de sécurité)",\n'
+        + '      "roic": "~35%", "roce": "~30%", "evFcf": "~45x",\n'
+        + '      "reverseDcf": "le cours implique ~25%/an de croissance du FCF sur 10 ans — exigeant au vu du TAM",\n'
+        + '      "moat": "Effet de réseau global + coûts de changement (CUDA)",\n'
+        + '      "cycleDeVie": "Hyper-croissance",\n'
+        + '      "redFlags": ["dilution SBC ~2%/an"],\n'
+        + '      "margeSecurite": "faible : le prix intègre déjà l\'exécution parfaite",\n'
+        + '      "these": "2 à 4 phrases : pourquoi ce dossier, ancrées sur les piliers",\n'
+        + '      "risques": "1 à 3 phrases : ce qui casse la thèse",\n'
+        + '      "confiance": "haute",\n'
+        + '      "aVerifier": ["dernier ROIC publié", "SBC en % du CA sur le dernier exercice"]\n'
+        + "    }\n"
+        + "  ],\n"
+        + '  "laureats": ["TICKER"],\n'
+        + '  "justificationFinale": "4 à 8 phrases : pourquoi CES sociétés-là ressortent, en termes d\'asymétrie et de marge de sécurité",\n'
+        + '  "ecartes": [{"ticker": "XXX", "raison": "red flag comptable / value trap / valorisation sans marge de sécurité"}]\n'
+        + "}\n"
+        + "Les scores de piliers vont de 0 à 10, le scoreGlobal de 0 à 100. Classe du meilleur au moins bon. \"confiance\" vaut \"haute\", \"moyenne\" ou \"faible\".";
+
+      var _vmo = await geminiModelOrder(_vKey);
+      var _vg = await geminiGenerate(_vKey, _vmo.order, {
+        contents: [{ role: "user", parts: [{ text: vPrompt }] }],
+        generationConfig: { maxOutputTokens: 32768, temperature: 0.4 },
+      }, 110000, _vmo.limits);
+      if (!_vg.ok) return json({ ok: false, error: "Gemini API — " + _vg.error }, 502);
+
+      var vClean = _vg.text.replace(/```json/gi, "").replace(/```/g, "").trim();
+      var vMatch = vClean.match(/\{[\s\S]*\}/);
+      var verdict = null;
+      if (vMatch) { try { verdict = JSON.parse(vMatch[0]); } catch (eVJ) {} }
+      if (!verdict || typeof verdict !== "object") {
+        return json({ ok: false, error: "Réponse de l'analyste illisible (JSON non exploitable)", brut: vClean.slice(0, 400) }, 502);
+      }
+      if (!Array.isArray(verdict.classement)) verdict.classement = [];
+      if (!Array.isArray(verdict.laureats)) verdict.laureats = [];
+      if (!Array.isArray(verdict.ecartes)) verdict.ecartes = [];
+      verdict.ecartesCrypto = vCrypto;
+      verdict.analysees = vStocks.length;
+      return json({ ok: true, verdict: verdict, model: _vg.model });
+    } catch (e) {
+      return json({ ok: false, error: e.message }, 500);
+    }
   }
 
   if (path === "/screener_scan" && request.method === "POST") {
