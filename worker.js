@@ -105,7 +105,20 @@ var JCGI_MANUEL = [
 var GEMINI_MODEL_FALLBACKS = ["gemini-3.6-flash", "gemini-flash-latest", "gemini-2.5-flash"];
 var GEMINI_MODEL_KV = "cgi_gemini_model";
 
+var GEMINI_MODELS_KV = "cgi_gemini_models";
+var GEMINI_MODELS_TTL = 24 * 3600 * 1000;
+
 async function geminiListModels(key) {
+  // Le catalogue ne bouge pas d'une minute à l'autre : on le garde 24 h. Sans ce
+  // cache, chaque scan payait un aller-retour supplémentaire avant même de poser
+  // sa question — du temps pris sur celui que le navigateur accorde.
+  try {
+    var cached = await GDB_KV.get(GEMINI_MODELS_KV);
+    if (cached) {
+      var cd = JSON.parse(cached);
+      if (cd && Array.isArray(cd.models) && (Date.now() - (cd.ts || 0)) < GEMINI_MODELS_TTL) return cd.models;
+    }
+  } catch (e) {}
   try {
     var r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", {
       headers: { "x-goog-api-key": key }, signal: AbortSignal.timeout(15000),
@@ -123,12 +136,18 @@ async function geminiListModels(key) {
   } catch (e) { return []; }
 }
 
+async function geminiListModelsCached(key) {
+  var models = await geminiListModels(key);
+  if (models.length) { try { await GDB_KV.put(GEMINI_MODELS_KV, JSON.stringify({ ts: Date.now(), models: models })); } catch (e) {} }
+  return models;
+}
+
 // Ordre d'essai : le modèle mémorisé, puis les replis connus, puis ce que la clé
 // expose réellement (les « flash » d'abord, du plus récent au plus ancien).
 async function geminiModelOrder(key) {
   var remembered = null;
   try { remembered = await GDB_KV.get(GEMINI_MODEL_KV); } catch (e) {}
-  var discovered = await geminiListModels(key);
+  var discovered = await geminiListModelsCached(key);
   var limits = {};
   discovered.forEach(function (m) { limits[m.id] = m.outMax; });
   var ids = discovered.map(function (m) { return m.id; });
@@ -2673,8 +2692,19 @@ async function handleRequest(request) {
         // 30 candidats × ~8 champs : il faut de la marge, sinon le JSON est tronqué en plein
         // milieu et le parse échoue (liste vide côté app).
         generationConfig: { maxOutputTokens: 32768, temperature: 0.9 },
-      }, 55000, _mo.limits);
-      if (!_gen.ok) return json({ ok: false, error: "Gemini API — " + _gen.error }, 502);
+        // Enveloppe volontairement sous le délai que l'app accorde à la requête :
+        // c'est le Worker qui doit expliquer un dépassement, pas le navigateur qui
+        // coupe avec un « Fetch is aborted » incompréhensible.
+      }, 45000, _mo.limits, 95000);
+      if (!_gen.ok) {
+        return json({
+          ok: false,
+          error: _gen.timeout
+            ? "Le scan a dépassé le temps imparti. Réessaie — le modèle retenu est mémorisé, la seconde tentative est en général bien plus rapide."
+            : "Gemini API — " + _gen.error,
+          timeout: !!_gen.timeout,
+        }, _gen.timeout ? 504 : 502);
+      }
 
       var sClean = _gen.text.replace(/```json/gi, "").replace(/```/g, "").trim();
       var sMatch = sClean.match(/\[[\s\S]*\]/);
