@@ -67,31 +67,69 @@ async function geminiModelOrder(key) {
   return { order: order, discovered: discovered };
 }
 
-// Appelle generateContent en descendant la liste. Renvoie le premier succès, ou
-// la DERNIÈRE erreur rencontrée (avec le nom du modèle, pour un diagnostic net).
+// Extrait le texte utile d'une réponse generateContent. Les modèles à
+// raisonnement renvoient aussi des parties « pensée » (part.thought === true) :
+// ce n'est pas la réponse, il ne faut surtout pas la concaténer.
+function geminiTextOf(data) {
+  var out = "";
+  var cand = data && data.candidates && data.candidates[0];
+  var parts = (cand && cand.content && cand.content.parts) || [];
+  parts.forEach(function (part) {
+    if (part && typeof part.text === "string" && part.thought !== true) out += part.text;
+  });
+  return out;
+}
+
+// Appelle generateContent en descendant la liste. Renvoie le premier modèle qui
+// répond avec du TEXTE — un 200 vide compte comme un échec, sinon l'app reçoit
+// « aucun ticker trouvé » alors que le vrai problème est ailleurs.
 async function geminiGenerate(key, order, body, timeoutMs) {
   var lastErr = "aucun modèle essayé";
   for (var i = 0; i < order.length && i < 6; i++) {
     var model = order[i];
-    try {
-      var r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs || 55000),
-      });
-      var d = await r.json();
-      if (r.ok) {
-        try { await GDB_KV.put(GEMINI_MODEL_KV, model); } catch (e) {}
-        return { ok: true, model: model, data: d };
+    // Les Gemini 3.x réfléchissent avant de répondre et ces tokens de réflexion
+    // sont décomptés de maxOutputTokens : sans budget explicite, la réflexion
+    // consomme TOUT et la réponse revient vide (200, zéro texte). On demande donc
+    // zéro réflexion. Certains modèles refusent ce réglage : on réessaie alors
+    // le même modèle sans, plutôt que de le déclarer perdu.
+    for (var pass = 0; pass < 2; pass++) {
+      var sendBody = JSON.parse(JSON.stringify(body));
+      if (pass === 0) {
+        sendBody.generationConfig = Object.assign({}, sendBody.generationConfig, {
+          thinkingConfig: Object.assign({ thinkingBudget: 0 }, (sendBody.generationConfig || {}).thinkingConfig),
+        });
       }
-      lastErr = model + " → " + r.status + " : " + ((d && d.error && d.error.message) || JSON.stringify(d).slice(0, 200));
-      // 404/400 = modèle retiré ou inconnu ; 429 = quota sur CE modèle. Dans les
-      // deux cas le suivant peut passer, on continue. Une 401/403 est une clé
-      // invalide : inutile d'insister.
-      if (r.status === 401 || r.status === 403) return { ok: false, error: lastErr, model: model };
-    } catch (e) {
-      lastErr = model + " → " + (e && e.message ? e.message : String(e));
+      try {
+        var r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+          body: JSON.stringify(sendBody),
+          signal: AbortSignal.timeout(timeoutMs || 55000),
+        });
+        var d = await r.json();
+        if (r.ok) {
+          var txt = geminiTextOf(d);
+          if (txt) {
+            try { await GDB_KV.put(GEMINI_MODEL_KV, model); } catch (e) {}
+            return { ok: true, model: model, data: d, text: txt };
+          }
+          // 200 sans texte : presque toujours MAX_TOKENS mangé par la réflexion.
+          var fr = (d.candidates && d.candidates[0] && d.candidates[0].finishReason) || "?";
+          var thoughts = (d.usageMetadata && d.usageMetadata.thoughtsTokenCount) || 0;
+          lastErr = model + " → réponse vide (finishReason " + fr + ", " + thoughts + " tokens de réflexion)";
+          break; // réessayer sans thinkingConfig ne rendrait pas la réponse moins vide
+        }
+        var msg = (d && d.error && d.error.message) || JSON.stringify(d).slice(0, 200);
+        lastErr = model + " → " + r.status + " : " + msg;
+        // Réglage de réflexion refusé par ce modèle → on retente sans.
+        if (pass === 0 && r.status === 400 && /thinking/i.test(msg)) continue;
+        // 401/403 = clé invalide : insister sur d'autres modèles ne sert à rien.
+        if (r.status === 401 || r.status === 403) return { ok: false, error: lastErr, model: model };
+        break; // 404 (retiré) ou 429 (quota) → modèle suivant
+      } catch (e) {
+        lastErr = model + " → " + (e && e.message ? e.message : String(e));
+        break;
+      }
     }
   }
   return { ok: false, error: lastErr };
@@ -2354,15 +2392,13 @@ async function handleRequest(request) {
     var _dKey = (typeof GEMINI_API_KEY !== "undefined") ? GEMINI_API_KEY : null;
     if (!_dKey) return json({ ok: false, cleAbsente: true, error: "GEMINI_API_KEY non configurée sur le Worker" }, 500);
     var _dmo = await geminiModelOrder(_dKey);
+    // Même forme de demande que le scan (JSON, budget de sortie large) : un test
+    // trop court passerait alors que le vrai appel échoue.
     var _dg = await geminiGenerate(_dKey, _dmo.order, {
-      contents: [{ role: "user", parts: [{ text: "Réponds exactement : OK" }] }],
-      generationConfig: { maxOutputTokens: 16 },
-    }, 20000);
-    var _dTxt = "";
-    if (_dg.ok) {
-      var _dc = _dg.data.candidates && _dg.data.candidates[0];
-      ((_dc && _dc.content && _dc.content.parts) || []).forEach(function (pt) { if (pt && pt.text) _dTxt += pt.text; });
-    }
+      contents: [{ role: "user", parts: [{ text: "Réponds UNIQUEMENT avec ce JSON strict : [{\"ticker\":\"NVDA\",\"name\":\"NVIDIA Corporation\"}]" }] }],
+      generationConfig: { maxOutputTokens: 2048, temperature: 0.9 },
+    }, 30000);
+    var _dTxt = _dg.ok ? _dg.text : "";
     return json({
       ok: !!_dg.ok,
       cleAbsente: false,
@@ -2400,16 +2436,11 @@ async function handleRequest(request) {
         contents: [{ role: "user", parts: [{ text: sPrompt }] }],
         // 30 candidats × ~8 champs : il faut de la marge, sinon le JSON est tronqué en plein
         // milieu et le parse échoue (liste vide côté app).
-        generationConfig: { maxOutputTokens: 8192, temperature: 0.9 },
+        generationConfig: { maxOutputTokens: 32768, temperature: 0.9 },
       }, 55000);
       if (!_gen.ok) return json({ ok: false, error: "Gemini API — " + _gen.error }, 502);
-      var aData = _gen.data;
 
-      var textOut = "";
-      var _cand0 = aData.candidates && aData.candidates[0];
-      var _parts = (_cand0 && _cand0.content && _cand0.content.parts) || [];
-      _parts.forEach(function (part) { if (part && typeof part.text === "string") textOut += part.text; });
-      var sClean = textOut.replace(/```json/gi, "").replace(/```/g, "").trim();
+      var sClean = _gen.text.replace(/```json/gi, "").replace(/```/g, "").trim();
       var sMatch = sClean.match(/\[[\s\S]*\]/);
       var candidates = [];
       if (sMatch) { try { candidates = JSON.parse(sMatch[0]); } catch (eJ) {} }
