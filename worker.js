@@ -26,6 +26,77 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Headers": "Content-Type, X-Auth-Key",
 };
 
+// ════════════════════════════════════════════════════════════════════════════
+//  GEMINI — choix du modèle, tolérant aux retraits
+//  Google retire ses modèles sans préavis pour les nouvelles clés : c'est déjà
+//  arrivé une fois (gemini-2.5-flash), et un identifiant figé fait tomber tout
+//  le screener. On demande donc à l'API la liste des modèles RÉELLEMENT
+//  disponibles pour cette clé, on garde les « flash » (rapides et éligibles au
+//  palier gratuit), et on essaie dans l'ordre jusqu'à ce que l'un réponde.
+//  Le modèle qui a marché est mémorisé en KV pour éviter la découverte à chaque
+//  appel ; il repasse en tête de liste au coup suivant.
+// ════════════════════════════════════════════════════════════════════════════
+var GEMINI_MODEL_FALLBACKS = ["gemini-3.6-flash", "gemini-flash-latest", "gemini-2.5-flash"];
+var GEMINI_MODEL_KV = "cgi_gemini_model";
+
+async function geminiListModels(key) {
+  try {
+    var r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", {
+      headers: { "x-goog-api-key": key }, signal: AbortSignal.timeout(15000),
+    });
+    if (!r.ok) return [];
+    var d = await r.json();
+    return (d.models || [])
+      .filter(function (m) { return (m.supportedGenerationMethods || []).indexOf("generateContent") >= 0; })
+      .map(function (m) { return String(m.name || "").replace(/^models\//, ""); })
+      .filter(Boolean);
+  } catch (e) { return []; }
+}
+
+// Ordre d'essai : le modèle mémorisé, puis les replis connus, puis ce que la clé
+// expose réellement (les « flash » d'abord, du plus récent au plus ancien).
+async function geminiModelOrder(key) {
+  var remembered = null;
+  try { remembered = await GDB_KV.get(GEMINI_MODEL_KV); } catch (e) {}
+  var discovered = await geminiListModels(key);
+  var flash = discovered.filter(function (m) { return /flash/i.test(m) && !/thinking|image|audio|tts|embedding/i.test(m); }).sort().reverse();
+  var order = [];
+  [remembered].concat(GEMINI_MODEL_FALLBACKS).concat(flash).concat(discovered).forEach(function (m) {
+    if (m && order.indexOf(m) < 0) order.push(m);
+  });
+  return { order: order, discovered: discovered };
+}
+
+// Appelle generateContent en descendant la liste. Renvoie le premier succès, ou
+// la DERNIÈRE erreur rencontrée (avec le nom du modèle, pour un diagnostic net).
+async function geminiGenerate(key, order, body, timeoutMs) {
+  var lastErr = "aucun modèle essayé";
+  for (var i = 0; i < order.length && i < 6; i++) {
+    var model = order[i];
+    try {
+      var r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs || 55000),
+      });
+      var d = await r.json();
+      if (r.ok) {
+        try { await GDB_KV.put(GEMINI_MODEL_KV, model); } catch (e) {}
+        return { ok: true, model: model, data: d };
+      }
+      lastErr = model + " → " + r.status + " : " + ((d && d.error && d.error.message) || JSON.stringify(d).slice(0, 200));
+      // 404/400 = modèle retiré ou inconnu ; 429 = quota sur CE modèle. Dans les
+      // deux cas le suivant peut passer, on continue. Une 401/403 est une clé
+      // invalide : inutile d'insister.
+      if (r.status === 401 || r.status === 403) return { ok: false, error: lastErr, model: model };
+    } catch (e) {
+      lastErr = model + " → " + (e && e.message ? e.message : String(e));
+    }
+  }
+  return { ok: false, error: lastErr };
+}
+
 function json(data, status) {
   return new Response(JSON.stringify(data), {
     status: status || 200,
@@ -2275,6 +2346,35 @@ async function handleRequest(request) {
   // ancienneté, tendance) est refaite côté app avec de vraies données Yahoo
   // Finance, qui rattrape aussi les tickers proposés par erreur/radiés — cet
   // endpoint ne renvoie qu'une liste de candidats.
+  // ── GET /screener_diag?k=… ────────────────────────────────────────────────
+  // Dit en une réponse POURQUOI le scan échoue : clé présente ou non, modèles que
+  // la clé peut réellement appeler, modèle retenu, et la réponse brute de Gemini
+  // à une question triviale. Ouvrable dans un navigateur, aucun secret renvoyé.
+  if (path === "/screener_diag" && request.method === "GET") {
+    var _dKey = (typeof GEMINI_API_KEY !== "undefined") ? GEMINI_API_KEY : null;
+    if (!_dKey) return json({ ok: false, cleAbsente: true, error: "GEMINI_API_KEY non configurée sur le Worker" }, 500);
+    var _dmo = await geminiModelOrder(_dKey);
+    var _dg = await geminiGenerate(_dKey, _dmo.order, {
+      contents: [{ role: "user", parts: [{ text: "Réponds exactement : OK" }] }],
+      generationConfig: { maxOutputTokens: 16 },
+    }, 20000);
+    var _dTxt = "";
+    if (_dg.ok) {
+      var _dc = _dg.data.candidates && _dg.data.candidates[0];
+      ((_dc && _dc.content && _dc.content.parts) || []).forEach(function (pt) { if (pt && pt.text) _dTxt += pt.text; });
+    }
+    return json({
+      ok: !!_dg.ok,
+      cleAbsente: false,
+      longueurCle: String(_dKey).length,
+      modelesDisponibles: _dmo.discovered,
+      ordreDEssai: _dmo.order.slice(0, 6),
+      modeleRetenu: _dg.model || null,
+      reponseTest: _dTxt || null,
+      erreur: _dg.ok ? null : _dg.error,
+    });
+  }
+
   if (path === "/screener_scan" && request.method === "POST") {
     try {
       var _sKey = (typeof GEMINI_API_KEY !== "undefined") ? GEMINI_API_KEY : null;
@@ -2295,23 +2395,15 @@ async function handleRequest(request) {
         + "[{\"ticker\":\"NVDA\",\"yahooSymbol\":\"NVDA\",\"market\":\"stock\",\"name\":\"NVIDIA Corporation\",\"exchange\":\"NASDAQ\",\"country\":\"US\",\"sector\":\"Intelligence artificielle / semi-conducteurs\",\"note\":\"1 phrase expliquant pourquoi ce ticker correspond aux conditions\"}]\n"
         + "Pour une cryptomonnaie : \"market\":\"crypto\" et \"yahooSymbol\" au format \"BTC-USD\".";
 
-      var _geminiModel = "gemini-3.6-flash";
-      var aResp = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + _geminiModel + ":generateContent", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-goog-api-key": _sKey },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: sPrompt }] }],
-          // 30 candidats × ~8 champs : il faut de la marge, sinon le JSON est tronqué en plein
-          // milieu et le parse échoue (liste vide côté app).
-          generationConfig: { maxOutputTokens: 8192, temperature: 0.9 },
-        }),
-        signal: AbortSignal.timeout(55000),
-      });
-      var aData = await aResp.json();
-      if (!aResp.ok) {
-        var aErr = (aData && aData.error && aData.error.message) || JSON.stringify(aData).slice(0, 300);
-        return json({ ok: false, error: "Gemini API " + aResp.status + " : " + aErr }, 502);
-      }
+      var _mo = await geminiModelOrder(_sKey);
+      var _gen = await geminiGenerate(_sKey, _mo.order, {
+        contents: [{ role: "user", parts: [{ text: sPrompt }] }],
+        // 30 candidats × ~8 champs : il faut de la marge, sinon le JSON est tronqué en plein
+        // milieu et le parse échoue (liste vide côté app).
+        generationConfig: { maxOutputTokens: 8192, temperature: 0.9 },
+      }, 55000);
+      if (!_gen.ok) return json({ ok: false, error: "Gemini API — " + _gen.error }, 502);
+      var aData = _gen.data;
 
       var textOut = "";
       var _cand0 = aData.candidates && aData.candidates[0];
@@ -2334,7 +2426,7 @@ async function handleRequest(request) {
           note: c.note ? String(c.note).trim() : null,
         };
       });
-      return json({ ok: true, candidates: candidates });
+      return json({ ok: true, candidates: candidates, model: _gen.model });
     } catch (e) {
       return json({ ok: false, error: e.message }, 500);
     }
