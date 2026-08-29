@@ -170,9 +170,12 @@ var GEMINI_MAX_ATTEMPTS = 8;   // borne le temps total : 8 appels au pire
 // « aucun ticker trouvé » alors que le vrai problème est ailleurs.
 // Toutes les tentatives sont conservées : l'erreur renvoyée les résume, au lieu
 // de ne montrer que la dernière (qui désigne alors un modèle innocent).
-async function geminiGenerate(key, order, body, timeoutMs, limits) {
+async function geminiGenerate(key, order, body, timeoutMs, limits, budgetMs) {
   var journal = [];
   var attempts = 0;
+  var t0 = Date.now();
+  var budget = budgetMs || 0;   // 0 = pas d'enveloppe globale
+  var aExpire = false;          // au moins une tentative coupée sur le temps
   var wantOut = (body.generationConfig && body.generationConfig.maxOutputTokens) || 8192;
   var rememberedVariant = null;
   try { rememberedVariant = await GDB_KV.get(GEMINI_MODEL_KV + "_think"); } catch (e) {}
@@ -190,6 +193,12 @@ async function geminiGenerate(key, order, body, timeoutMs, limits) {
     }
 
     for (var v = 0; v < variants.length && attempts < GEMINI_MAX_ATTEMPTS; v++) {
+      // On ne LANCE pas une tentative qu'on ne pourra pas mener à terme.
+      var reste = budget ? budget - (Date.now() - t0) : Infinity;
+      if (budget && reste < 15000) {
+        journal.push("enveloppe de temps épuisée après " + Math.round((Date.now() - t0) / 1000) + " s");
+        return { ok: false, error: journal.join(" | "), journal: journal, timeout: true };
+      }
       attempts++;
       var variant = variants[v];
       var gc = Object.assign({}, body.generationConfig, { maxOutputTokens: outTok });
@@ -201,7 +210,7 @@ async function geminiGenerate(key, order, body, timeoutMs, limits) {
           method: "POST",
           headers: { "Content-Type": "application/json", "x-goog-api-key": key },
           body: JSON.stringify(sendBody),
-          signal: AbortSignal.timeout(timeoutMs || 55000),
+          signal: AbortSignal.timeout(Math.min(timeoutMs || 55000, reste)),
         });
         var d = await r.json();
         if (r.ok) {
@@ -226,12 +235,17 @@ async function geminiGenerate(key, order, body, timeoutMs, limits) {
         if (r.status === 400) continue;
         break; // 404 (retiré) / 429 (quota) → modèle suivant
       } catch (e) {
-        journal.push(etiquette + " → " + (e && e.message ? e.message : String(e)));
+        // Un abandon sur délai n'est pas une panne du modèle : c'est la requête
+        // qui est trop lourde. Il faut le dire, pas le noyer dans un message
+        // technique que l'utilisateur ne peut pas interpréter.
+        var estDelai = !!(e && (e.name === "TimeoutError" || /timed? ?out|aborted/i.test(e.message || "")));
+        if (estDelai) aExpire = true;
+        journal.push(etiquette + " → " + (estDelai ? "délai dépassé" : (e && e.message ? e.message : String(e))));
         break;
       }
     }
   }
-  return { ok: false, error: journal.length ? journal.join(" | ") : "aucun modèle essayé", journal: journal };
+  return { ok: false, error: journal.length ? journal.join(" | ") : "aucun modèle essayé", journal: journal, timeout: aExpire };
 }
 
 function json(data, status) {
@@ -2533,7 +2547,10 @@ async function handleRequest(request) {
       // laisser le modèle inventer des états financiers.
       var vCrypto = vCands.filter(function (c) { return c && c.market === "crypto"; })
         .map(function (c) { return String(c.ticker || "").toUpperCase(); });
-      var vStocks = vCands.filter(function (c) { return c && c.ticker && c.market !== "crypto"; }).slice(0, 12);
+      // 8 et non 12 : au-delà, l'instruction complète des 7 piliers dépasse le
+      // temps que le navigateur accorde à la requête. Mieux vaut 8 dossiers
+      // rendus que 12 perdus dans un dépassement de délai.
+      var vStocks = vCands.filter(function (c) { return c && c.ticker && c.market !== "crypto"; }).slice(0, 8);
       if (!vStocks.length) {
         return json({ ok: false, error: "Aucune action à analyser (le manuel ne s'applique pas aux cryptomonnaies).", ecartesCrypto: vCrypto }, 400);
       }
@@ -2600,9 +2617,17 @@ async function handleRequest(request) {
       var _vmo = await geminiModelOrder(_vKey);
       var _vg = await geminiGenerate(_vKey, _vmo.order, {
         contents: [{ role: "user", parts: [{ text: vPrompt }] }],
-        generationConfig: { maxOutputTokens: 32768, temperature: 0.4 },
-      }, 110000, _vmo.limits);
-      if (!_vg.ok) return json({ ok: false, error: "Gemini API — " + _vg.error }, 502);
+        generationConfig: { maxOutputTokens: 16384, temperature: 0.4 },
+      }, 105000, _vmo.limits, 190000);
+      if (!_vg.ok) {
+        return json({
+          ok: false,
+          error: _vg.timeout
+            ? "L'analyse a dépassé le temps imparti. Réessaie, ou relance le scan avec moins de conditions pour réduire la sélection."
+            : "Gemini API — " + _vg.error,
+          timeout: !!_vg.timeout,
+        }, _vg.timeout ? 504 : 502);
+      }
 
       var vClean = _vg.text.replace(/```json/gi, "").replace(/```/g, "").trim();
       var vMatch = vClean.match(/\{[\s\S]*\}/);
