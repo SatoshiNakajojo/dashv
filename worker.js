@@ -48,8 +48,12 @@ async function geminiListModels(key) {
     var d = await r.json();
     return (d.models || [])
       .filter(function (m) { return (m.supportedGenerationMethods || []).indexOf("generateContent") >= 0; })
-      .map(function (m) { return String(m.name || "").replace(/^models\//, ""); })
-      .filter(Boolean);
+      // outputTokenLimit est capital : demander plus que ce qu'un modèle accepte
+      // se solde par un « 400 invalid argument » parfaitement muet sur la cause.
+      .map(function (m) {
+        return { id: String(m.name || "").replace(/^models\//, ""), outMax: m.outputTokenLimit || 0 };
+      })
+      .filter(function (m) { return m.id; });
   } catch (e) { return []; }
 }
 
@@ -59,12 +63,15 @@ async function geminiModelOrder(key) {
   var remembered = null;
   try { remembered = await GDB_KV.get(GEMINI_MODEL_KV); } catch (e) {}
   var discovered = await geminiListModels(key);
-  var flash = discovered.filter(function (m) { return /flash/i.test(m) && !/thinking|image|audio|tts|embedding/i.test(m); }).sort().reverse();
+  var limits = {};
+  discovered.forEach(function (m) { limits[m.id] = m.outMax; });
+  var ids = discovered.map(function (m) { return m.id; });
+  var flash = ids.filter(function (m) { return /flash/i.test(m) && !/thinking|image|audio|tts|embedding|transcribe|omni/i.test(m); }).sort().reverse();
   var order = [];
-  [remembered].concat(GEMINI_MODEL_FALLBACKS).concat(flash).concat(discovered).forEach(function (m) {
+  [remembered].concat(GEMINI_MODEL_FALLBACKS).concat(flash).concat(ids).forEach(function (m) {
     if (m && order.indexOf(m) < 0) order.push(m);
   });
-  return { order: order, discovered: discovered };
+  return { order: order, discovered: ids, limits: limits };
 }
 
 // Extrait le texte utile d'une réponse generateContent. Les modèles à
@@ -80,25 +87,49 @@ function geminiTextOf(data) {
   return out;
 }
 
-// Appelle generateContent en descendant la liste. Renvoie le premier modèle qui
-// répond avec du TEXTE — un 200 vide compte comme un échec, sinon l'app reçoit
+// Réglage de la réflexion : chaque génération de modèles a sa syntaxe, et passer
+// la mauvaise vaut un « 400 invalid argument » qui ne dit pas laquelle. Plutôt
+// que de deviner la famille d'après le nom, on essaie les trois formes.
+// « aucune » d'abord : avec un budget de sortie suffisant, la réflexion tient
+// dedans et c'est la variante qu'aucun modèle ne refuse.
+var GEMINI_THINK_VARIANTS = [
+  { nom: "aucune", cfg: null },
+  { nom: "thinkingLevel:low", cfg: { thinkingLevel: "low" } },   // Gemini 3.x
+  { nom: "thinkingBudget:0", cfg: { thinkingBudget: 0 } },        // Gemini 2.x
+];
+var GEMINI_MAX_ATTEMPTS = 8;   // borne le temps total : 8 appels au pire
+
+// Appelle generateContent en essayant (modèle × forme de réflexion) jusqu'à
+// obtenir du TEXTE. Un 200 vide compte comme un échec : sinon l'app reçoit
 // « aucun ticker trouvé » alors que le vrai problème est ailleurs.
-async function geminiGenerate(key, order, body, timeoutMs) {
-  var lastErr = "aucun modèle essayé";
-  for (var i = 0; i < order.length && i < 6; i++) {
+// Toutes les tentatives sont conservées : l'erreur renvoyée les résume, au lieu
+// de ne montrer que la dernière (qui désigne alors un modèle innocent).
+async function geminiGenerate(key, order, body, timeoutMs, limits) {
+  var journal = [];
+  var attempts = 0;
+  var wantOut = (body.generationConfig && body.generationConfig.maxOutputTokens) || 8192;
+  var rememberedVariant = null;
+  try { rememberedVariant = await GDB_KV.get(GEMINI_MODEL_KV + "_think"); } catch (e) {}
+
+  for (var i = 0; i < order.length && attempts < GEMINI_MAX_ATTEMPTS; i++) {
     var model = order[i];
-    // Les Gemini 3.x réfléchissent avant de répondre et ces tokens de réflexion
-    // sont décomptés de maxOutputTokens : sans budget explicite, la réflexion
-    // consomme TOUT et la réponse revient vide (200, zéro texte). On demande donc
-    // zéro réflexion. Certains modèles refusent ce réglage : on réessaie alors
-    // le même modèle sans, plutôt que de le déclarer perdu.
-    for (var pass = 0; pass < 2; pass++) {
-      var sendBody = JSON.parse(JSON.stringify(body));
-      if (pass === 0) {
-        sendBody.generationConfig = Object.assign({}, sendBody.generationConfig, {
-          thinkingConfig: Object.assign({ thinkingBudget: 0 }, (sendBody.generationConfig || {}).thinkingConfig),
-        });
-      }
+    // Ne jamais demander plus que ce que le modèle sait produire.
+    var cap = (limits && limits[model]) ? limits[model] : 0;
+    var outTok = cap ? Math.min(wantOut, cap) : wantOut;
+
+    // La forme qui a marché la dernière fois passe en tête.
+    var variants = GEMINI_THINK_VARIANTS.slice();
+    if (rememberedVariant) {
+      variants.sort(function (a, b) { return (b.nom === rememberedVariant) - (a.nom === rememberedVariant); });
+    }
+
+    for (var v = 0; v < variants.length && attempts < GEMINI_MAX_ATTEMPTS; v++) {
+      attempts++;
+      var variant = variants[v];
+      var gc = Object.assign({}, body.generationConfig, { maxOutputTokens: outTok });
+      if (variant.cfg) gc.thinkingConfig = variant.cfg;
+      var sendBody = Object.assign({}, body, { generationConfig: gc });
+      var etiquette = model + " [" + variant.nom + ", out=" + outTok + "]";
       try {
         var r = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", {
           method: "POST",
@@ -110,29 +141,31 @@ async function geminiGenerate(key, order, body, timeoutMs) {
         if (r.ok) {
           var txt = geminiTextOf(d);
           if (txt) {
-            try { await GDB_KV.put(GEMINI_MODEL_KV, model); } catch (e) {}
-            return { ok: true, model: model, data: d, text: txt };
+            try {
+              await GDB_KV.put(GEMINI_MODEL_KV, model);
+              await GDB_KV.put(GEMINI_MODEL_KV + "_think", variant.nom);
+            } catch (e) {}
+            return { ok: true, model: model, variant: variant.nom, data: d, text: txt, journal: journal };
           }
-          // 200 sans texte : presque toujours MAX_TOKENS mangé par la réflexion.
           var fr = (d.candidates && d.candidates[0] && d.candidates[0].finishReason) || "?";
-          var thoughts = (d.usageMetadata && d.usageMetadata.thoughtsTokenCount) || 0;
-          lastErr = model + " → réponse vide (finishReason " + fr + ", " + thoughts + " tokens de réflexion)";
-          break; // réessayer sans thinkingConfig ne rendrait pas la réponse moins vide
+          var th = (d.usageMetadata && d.usageMetadata.thoughtsTokenCount) || 0;
+          journal.push(etiquette + " → vide (finishReason " + fr + ", " + th + " tokens de réflexion)");
+          continue; // une autre forme de réflexion peut laisser de la place au texte
         }
-        var msg = (d && d.error && d.error.message) || JSON.stringify(d).slice(0, 200);
-        lastErr = model + " → " + r.status + " : " + msg;
-        // Réglage de réflexion refusé par ce modèle → on retente sans.
-        if (pass === 0 && r.status === 400 && /thinking/i.test(msg)) continue;
-        // 401/403 = clé invalide : insister sur d'autres modèles ne sert à rien.
-        if (r.status === 401 || r.status === 403) return { ok: false, error: lastErr, model: model };
-        break; // 404 (retiré) ou 429 (quota) → modèle suivant
+        var msg = (d && d.error && d.error.message) || JSON.stringify(d).slice(0, 160);
+        journal.push(etiquette + " → " + r.status + " : " + msg);
+        // Clé invalide : aucun modèle ne passera, on arrête tout de suite.
+        if (r.status === 401 || r.status === 403) return { ok: false, error: journal.join(" | "), journal: journal };
+        // 400 = argument refusé → on tente une autre forme sur CE modèle.
+        if (r.status === 400) continue;
+        break; // 404 (retiré) / 429 (quota) → modèle suivant
       } catch (e) {
-        lastErr = model + " → " + (e && e.message ? e.message : String(e));
+        journal.push(etiquette + " → " + (e && e.message ? e.message : String(e)));
         break;
       }
     }
   }
-  return { ok: false, error: lastErr };
+  return { ok: false, error: journal.length ? journal.join(" | ") : "aucun modèle essayé", journal: journal };
 }
 
 function json(data, status) {
@@ -2396,8 +2429,8 @@ async function handleRequest(request) {
     // trop court passerait alors que le vrai appel échoue.
     var _dg = await geminiGenerate(_dKey, _dmo.order, {
       contents: [{ role: "user", parts: [{ text: "Réponds UNIQUEMENT avec ce JSON strict : [{\"ticker\":\"NVDA\",\"name\":\"NVIDIA Corporation\"}]" }] }],
-      generationConfig: { maxOutputTokens: 2048, temperature: 0.9 },
-    }, 30000);
+      generationConfig: { maxOutputTokens: 32768, temperature: 0.9 },
+    }, 30000, _dmo.limits);
     var _dTxt = _dg.ok ? _dg.text : "";
     return json({
       ok: !!_dg.ok,
@@ -2406,6 +2439,9 @@ async function handleRequest(request) {
       modelesDisponibles: _dmo.discovered,
       ordreDEssai: _dmo.order.slice(0, 6),
       modeleRetenu: _dg.model || null,
+      formeReflexion: _dg.variant || null,
+      limitesSortie: _dmo.order.slice(0, 6).map(function (m) { return m + " = " + (_dmo.limits[m] || "?"); }),
+      tentatives: _dg.journal || [],
       reponseTest: _dTxt || null,
       erreur: _dg.ok ? null : _dg.error,
     });
@@ -2437,7 +2473,7 @@ async function handleRequest(request) {
         // 30 candidats × ~8 champs : il faut de la marge, sinon le JSON est tronqué en plein
         // milieu et le parse échoue (liste vide côté app).
         generationConfig: { maxOutputTokens: 32768, temperature: 0.9 },
-      }, 55000);
+      }, 55000, _mo.limits);
       if (!_gen.ok) return json({ ok: false, error: "Gemini API — " + _gen.error }, 502);
 
       var sClean = _gen.text.replace(/```json/gi, "").replace(/```/g, "").trim();
@@ -2457,7 +2493,7 @@ async function handleRequest(request) {
           note: c.note ? String(c.note).trim() : null,
         };
       });
-      return json({ ok: true, candidates: candidates, model: _gen.model });
+      return json({ ok: true, candidates: candidates, model: _gen.model, variant: _gen.variant });
     } catch (e) {
       return json({ ok: false, error: e.message }, 500);
     }
