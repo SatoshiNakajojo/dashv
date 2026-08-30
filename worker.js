@@ -2338,6 +2338,10 @@ async function handleRequest(request) {
       "cgi_yfmap","cgi_icons","cgi_bench",
       "cgi_watchlist","cgi_inv","cgi_futures","cgi_ibkr_annex","cgi_fund_stats",
       "cgi_devices","cgi_ibkr_trades","cgi_ibkr_truth","cgi_pin","cgi_draws","cgi_alloc_targets","cgi_alloc_templates","cgi_kucoin_trades","cgi_cex_trades","cgi_manual_closed","cgi_pending_alerts","cgi_bank_moves","cgi_txns_tombstones","cgi_bank_hist",
+      // Journal quotidien : il sert de FORME aux courbes de fonds. Tant qu'il
+      // restait local, chaque appareil n'observait que les jours où il avait été
+      // ouvert — et dessinait donc une courbe différente des autres.
+      "cgi_daily",
     ];
     const result = { _ok: true };
     for (var i = 0; i < KEYS.length; i++) {
@@ -2377,6 +2381,7 @@ async function handleRequest(request) {
         "cgi_yfmap","cgi_icons","cgi_bench",
         "cgi_watchlist","cgi_inv","cgi_futures","cgi_ibkr_annex","cgi_fund_stats",
         "cgi_devices","cgi_pin","cgi_draws","cgi_alloc_targets","cgi_alloc_templates","cgi_cex_trades","cgi_manual_closed","cgi_pending_alerts","cgi_bank_moves","cgi_txns_tombstones",
+        "cgi_daily",
       ];
       var written = [];
       var errors2 = [];
@@ -2385,6 +2390,21 @@ async function handleRequest(request) {
         if (bases[key] !== undefined && bases[key] !== null) {
           try {
             var payload = bases[key];
+            // cgi_daily : FUSION PAR DATE, jamais de remplacement sec. Un appareil
+            // n'a que les jours où il a été ouvert ; l'union des appareils forme le
+            // journal complet. À date égale, l'écriture entrante gagne.
+            if (key === "cgi_daily" && Array.isArray(payload)) {
+              try {
+                var jOld = await GDB_KV.get("cgi_daily");
+                var jArr = jOld ? JSON.parse(jOld) : [];
+                if (!Array.isArray(jArr)) jArr = [];
+                var byDay = {};
+                jArr.forEach(function (e) { if (e && e.d) byDay[e.d] = e; });
+                payload.forEach(function (e) { if (e && e.d) byDay[e.d] = e; });
+                payload = Object.keys(byDay).sort().map(function (d) { return byDay[d]; });
+                if (payload.length > 1200) payload = payload.slice(-1200);
+              } catch (eJ) {}
+            }
             // #67g — cgi_txns : FUSION par id côté serveur, jamais de remplacement sec.
             // Un appareil dont les txns locales sont périmées ne peut plus effacer les
             // ajustements IBKR (ibkradj_*) ni les saisies d'un autre appareil : à id égal
