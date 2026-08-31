@@ -2342,6 +2342,8 @@ async function handleRequest(request) {
       // restait local, chaque appareil n'observait que les jours où il avait été
       // ouvert — et dessinait donc une courbe différente des autres.
       "cgi_daily",
+      // Thème : il suit l'utilisateur, pas l'appareil.
+      "cgi_theme",
     ];
     const result = { _ok: true };
     for (var i = 0; i < KEYS.length; i++) {
@@ -2381,7 +2383,7 @@ async function handleRequest(request) {
         "cgi_yfmap","cgi_icons","cgi_bench",
         "cgi_watchlist","cgi_inv","cgi_futures","cgi_ibkr_annex","cgi_fund_stats",
         "cgi_devices","cgi_pin","cgi_draws","cgi_alloc_targets","cgi_alloc_templates","cgi_cex_trades","cgi_manual_closed","cgi_pending_alerts","cgi_bank_moves","cgi_txns_tombstones",
-        "cgi_daily",
+        "cgi_daily","cgi_theme",
       ];
       var written = [];
       var errors2 = [];
