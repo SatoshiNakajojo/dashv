@@ -506,7 +506,27 @@ function barometerSVG(d, aud){
   // (2 lignes, pas de poste liquidités) laissait un grand vide avant le pied de page.
   var _caUSD = invest ? 0 : Math.round((d.bankEUR||0)/(d.usdEur||0.92));
   var _nRows = 2 + ((!invest && _caUSD>0) ? 1 : 0);
-  var W=900, H=1240 - (3-_nRows)*86;
+  // #192 — LECTURE DE MARCHÉ : réservée au relevé personnel. Reprend les trois bilans de la
+  // page Home de l'onglet Market (Cryptos, Actions, Santé globale) et les signaux par actif,
+  // tels que buildBilanSnapshot() les calcule déjà pour l'app. Le relevé investisseurs n'en
+  // porte rien : il reste un document de porteur de parts.
+  var _mkt = (!invest && d && d.bilan) ? d.bilan : null;
+  var _mktAssets = [];
+  if(_mkt && _mkt.assets){
+    for(var _k in _mkt.assets){ if(Object.prototype.hasOwnProperty.call(_mkt.assets,_k)){
+      var _a=_mkt.assets[_k];
+      if(_a && _a.heat!=null) _mktAssets.push({t:_k, heat:_a.heat, reco:_a.reco});
+    } }
+    // les signaux les plus tranchés d'abord : ce sont ceux qui appellent une décision
+    _mktAssets.sort(function(a,b){ return Math.abs(b.heat-50)-Math.abs(a.heat-50); });
+    _mktAssets = _mktAssets.slice(0,8);
+  }
+  // Hauteur réservée : titre + sous-titre + 3 jauges, puis, s'il y a des signaux, leur
+  // intertitre et leurs rangées de deux. Sous-dimensionnée, la liste passait par-dessus
+  // le pied de page — l'image n'a pas de flux, tout est positionné à la main.
+  var _mktRows = Math.ceil(_mktAssets.length/2);
+  var _MKT_H = _mkt ? (248 + (_mktAssets.length ? (86 + _mktRows*22) : 0)) : 0;
+  var W=900, H=1240 - (3-_nRows)*86 + _MKT_H;
   // Palette resserrée : encre chaude sur fond nuit, un seul métal (or), accents de performance discrets.
   var bg="#0A0A0C", ink="#EDE7DB", sub="#8B8375", faint="#565143",
       gold="#C6A86B", goldDim="#8E7440", hair="#211D16", hair2="#171410",
@@ -637,6 +657,48 @@ function barometerSVG(d, aud){
       S+='<text x="'+MR+'" y="'+(y+20)+'" text-anchor="end" fill="'+faint+'" font-family="'+sans+'" font-size="11.5" letter-spacing="0.4">'+Math.round(r[4]*100)+'% du total</text>';
     }
   });
+
+  // ── Lecture de marché (relevé personnel) ───────────────────────────────────
+  if(_mkt){
+    var my = ry + _nRows*86 + 6;
+    S+=rule(ML,my,MR);
+    S+='<text x="'+(W/2)+'" y="'+(my+40)+'" text-anchor="middle" fill="'+ink+'" font-family="'+serif+'" font-size="30" letter-spacing="2" font-weight="600">Lecture de marché</text>';
+    S+=label(W/2,my+64,"TEMPÉRATURE DES INDICATEURS · 0 FROID · 100 SURCHAUFFE",null,9.5);
+    // Une jauge par catégorie : la graduation est la même pour les trois, donc comparable d'un
+    // coup d'œil. La couleur suit la recommandation, pas la valeur brute.
+    var _recoCol=function(h2){ return h2==null?sub:(h2<25?pos:h2<40?"#9FBF8F":h2<60?gold:h2<80?"#C9A87A":neg); };
+    var cats=[["CRYPTOS",_mkt.crypto],["ACTIONS",_mkt.actions],["SANTÉ GLOBALE",_mkt.macro]];
+    var gy=my+96;
+    cats.forEach(function(c,i){
+      var y=gy+i*44, o=c[1]||{}, ht=(o.heat!=null)?o.heat:null;
+      S+='<text x="'+ML+'" y="'+y+'" fill="'+sub+'" font-family="'+sans+'" font-size="10" letter-spacing="3.4">'+esc(c[0])+'</text>';
+      var gx=ML+210, gw=CW-210-190, gh=6;
+      S+='<rect x="'+gx+'" y="'+(y-9)+'" width="'+gw+'" height="'+gh+'" rx="3" fill="'+hair+'"/>';
+      if(ht!=null){
+        S+='<rect x="'+gx+'" y="'+(y-9)+'" width="'+(gw*Math.max(0,Math.min(100,ht))/100).toFixed(1)+'" height="'+gh+'" rx="3" fill="'+_recoCol(ht)+'"/>';
+        S+='<circle cx="'+(gx+gw*Math.max(0,Math.min(100,ht))/100).toFixed(1)+'" cy="'+(y-6)+'" r="4" fill="'+_recoCol(ht)+'"/>';
+      }
+      S+='<text x="'+(MR-124)+'" y="'+(y+1)+'" text-anchor="end" fill="'+ink+'" font-family="'+serif+'" font-size="26" font-weight="600">'+(ht!=null?Math.round(ht):"—")+'</text>';
+      S+='<text x="'+MR+'" y="'+(y+1)+'" text-anchor="end" fill="'+_recoCol(ht)+'" font-family="'+sans+'" font-size="10.5" letter-spacing="2.4">'+esc((o.reco||"—").toUpperCase())+'</text>';
+    });
+    if(_mktAssets.length){
+      var ty=gy+3*44+20;
+      S+=rule(ML,ty,MR,hair2);
+      S+=label(ML,ty+24,"SIGNAUX LES PLUS TRANCHÉS","start",9.5);
+      // Deux colonnes. Chacune tient dans sa moitié : ticker à gauche, température puis
+      // recommandation calées à droite AVEC une gouttière — sans elle, la recommandation de
+      // la colonne de gauche passait sous le ticker de celle de droite.
+      var colW=CW/2, gout=28;
+      _mktAssets.forEach(function(a,i){
+        var col=i%2, row=Math.floor(i/2);
+        var ax=ML+col*colW, ay2=ty+50+row*22;
+        var recoT=String(a.reco||"").toUpperCase();
+        S+='<text x="'+ax+'" y="'+ay2+'" fill="'+ink+'" font-family="'+sans+'" font-size="12" letter-spacing="1.4" font-weight="600">'+esc(a.t)+'</text>';
+        S+='<text x="'+(ax+colW-gout-92)+'" y="'+ay2+'" text-anchor="end" fill="'+faint+'" font-family="'+serif+'" font-size="15">'+Math.round(a.heat)+'</text>';
+        S+='<text x="'+(ax+colW-gout)+'" y="'+ay2+'" text-anchor="end" fill="'+_recoCol(a.heat)+'" font-family="'+sans+'" font-size="9.5" letter-spacing="1.6">'+esc(recoT)+'</text>';
+      });
+    }
+  }
 
   // ── Pied de page ───────────────────────────────────────────────────────────
   var fy=H-124;
@@ -771,7 +833,16 @@ async function buildBaroData() {
       fundsSrc = fi ? "live+inv" : "live";
     }
   } catch (e) {}
-  return Object.assign(n, { pMaj: pMaj, p24: p24, p7: p7, M: M, health: _healthFromM(M),
+  // #192 — dernier bilan de marché (les trois catégories de la page Home de Market).
+  // Écrit par buildBilanSnapshot() à chaque cron : on le RELIT ici plutôt que de le
+  // recalculer, le relevé ne coûte donc aucun appel d'indicateur supplémentaire.
+  var bilan = null;
+  try {
+    var rawB = await GDB_KV.get("cgi_bilan_history");
+    var histB = rawB ? JSON.parse(rawB) : null;
+    if (Array.isArray(histB) && histB.length) bilan = histB[histB.length - 1];
+  } catch (e) {}
+  return Object.assign(n, { bilan: bilan, pMaj: pMaj, p24: p24, p7: p7, M: M, health: _healthFromM(M),
     cgicNav: cgicNav, cgisNav: cgisNav, cgicPnl: cgicPnl, cgisPnl: cgisPnl,
     cgicNavUSD: cgicNavUSD, cgisNavUSD: cgisNavUSD, ueApp: ueApp, fundsSrc: fundsSrc,
     spark: hist.map(function (h) { return h.v; }) });
