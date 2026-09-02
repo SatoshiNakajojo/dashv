@@ -927,6 +927,36 @@ async function ibkrFetchStatement() {
   if (!xml) return { ok: false, error: "rapport IBKR non prêt — réessayer dans une minute" };
   return { ok: true, xml: xml };
 }
+// #196 — FRAÎCHEUR DU RELEVÉ. Les métadonnées du <FlexStatement> n'étaient jamais lues : rien,
+// nulle part, ne disait de QUELLE DATE sont les positions. Or une Flex Query réglée sur
+// « Last Business Day » renvoie la clôture de la veille — la rappeler dix fois par jour redonne
+// dix fois la même chose. Sans cette information on ne peut pas distinguer « la synchro ne part
+// pas » de « la synchro part mais IBKR n'a rien de plus récent à donner ».
+function ibkrStatementInfo(xml) {
+  try {
+    var m = String(xml || "").match(/<FlexStatement\b[^>]*>/);
+    if (!m) return null;
+    var tag = m[0];
+    var info = { periode: _ibkrAttr(tag, "period"), du: _ibkrAttr(tag, "fromDate"),
+                 au: _ibkrAttr(tag, "toDate"), genere: _ibkrAttr(tag, "whenGenerated") };
+    // IBKR date les champs en AAAAMMJJ : on normalise pour pouvoir comparer à aujourd'hui.
+    var norm = function (d) {
+      if (!d) return null;
+      var t = String(d).replace(/[^0-9]/g, "");
+      return t.length >= 8 ? t.slice(0, 4) + "-" + t.slice(4, 6) + "-" + t.slice(6, 8) : null;
+    };
+    info.auISO = norm(info.au);
+    info.genereISO = norm(info.genere);
+    var today = new Date().toISOString().slice(0, 10);
+    info.couvreAujourdhui = !!(info.auISO && info.auISO >= today);
+    if (!info.couvreAujourdhui && info.auISO) {
+      info.avis = "Le relevé IBKR s'arrête au " + info.auISO + (info.periode ? " (période « " + info.periode + " »)" : "")
+        + " : il ne contient pas les mouvements d'aujourd'hui. Rappeler la synchro plus souvent ne changera rien — "
+        + "c'est la période de la Flex Query qu'il faut passer à « Today » dans le portail IBKR.";
+    }
+    return info;
+  } catch (e) { return null; }
+}
 function _ibkrAttr(tag, k) { var mm = tag.match(new RegExp(k + '="([^"]*)"')); return mm ? mm[1] : null; }
 function ibkrParsePositions(xml) {
   var out = [], re = /<OpenPosition\b[^>]*>/g, mo;
@@ -1114,6 +1144,7 @@ async function kucoinSync() {
 async function ibkrSyncPortfolio(purge, dry) {
   var st = await ibkrFetchStatement();
   if (!st.ok) return st;
+  var releve = ibkrStatementInfo(st.xml);   // #196 — de quelle date sont ces positions ?
   var positions = ibkrParsePositions(st.xml);
   if (!positions.length) return { ok: false, error: "rapport IBKR sans section Open Positions — vérifier la Flex Query" };
   var now = Date.now(), today = new Date().toISOString().slice(0, 10);
@@ -1181,7 +1212,8 @@ async function ibkrSyncPortfolio(purge, dry) {
   var nTr = dry ? 0 : await ibkrStoreTrades(ibkrParseTrades(st.xml));
   return { ok: true, dry: !!dry, misesAJourQuantites: updated, absentsDuRapport: soldees,
     presentsIBKRseulement: inconnusIBKR, reconciliationTxns: rec, executionsArchivees: nTr,
-    yfmapAjoutes: yfmapAjoutes, cashIBKR: cashMap, cashDip: cashDip || "inchangé (ou section Cash Report absente de la Flex Query)", date: today };
+    yfmapAjoutes: yfmapAjoutes, cashIBKR: cashMap, cashDip: cashDip || "inchangé (ou section Cash Report absente de la Flex Query)", date: today,
+    releve: releve };   // #196 — période et date du relevé IBKR, pour savoir si le rapport est frais
 }
 
 // ═══ #103/#120 — DIGEST quotidien : alertes en attente + news des positions détenues ═══
