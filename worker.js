@@ -2285,6 +2285,39 @@ async function handleRequest(request) {
   }
 
   // ── #67 — GET /ibkr_sync : synchronise cgi_portfolio depuis IBKR (&purge=1 pour solder les vendus)
+  // ── #197 — GET /ibkr_probe?q=<queryId> : LECTURE SEULE. Interroge une Flex Query et ne renvoie
+  //    que les métadonnées de son relevé (période, dates, nombre de positions). N'écrit RIEN,
+  //    ne touche à aucune base. Sert à savoir laquelle des Flex Queries couvre la journée en
+  //    cours avant de basculer IBKR_FLEX_QUERY_ID dessus.
+  if (path === "/ibkr_probe") {
+    var qid = url.searchParams.get("q");
+    if (!qid) return json({ ok: false, error: "paramètre q manquant : /ibkr_probe?k=…&q=<queryId>" }, 400);
+    if (typeof IBKR_FLEX_TOKEN === "undefined") return json({ ok: false, error: "IBKR_FLEX_TOKEN non configuré" }, 400);
+    try {
+      var rq = await fetch(IBKR_FLEX_BASE + "/SendRequest?t=" + IBKR_FLEX_TOKEN + "&q=" + encodeURIComponent(qid) + "&v=3", { headers: { "User-Agent": _UA } });
+      var tq = await rq.text();
+      var mc = tq.match(/<ReferenceCode>(\d+)<\/ReferenceCode>/);
+      if (!mc) { var me = tq.match(/<ErrorMessage>([\s\S]*?)<\/ErrorMessage>/); return json({ ok: false, error: "SendRequest: " + (me ? me[1] : tq.slice(0, 200)) }); }
+      var xq = null;
+      for (var ai = 0; ai < 5; ai++) {
+        await new Promise(function (res) { setTimeout(res, ai === 0 ? 1200 : 2500); });
+        var r2q = await fetch(IBKR_FLEX_BASE + "/GetStatement?t=" + IBKR_FLEX_TOKEN + "&q=" + mc[1] + "&v=3", { headers: { "User-Agent": _UA } });
+        var t2q = await r2q.text();
+        if (t2q.indexOf("<FlexQueryResponse") >= 0) { xq = t2q; break; }
+        if (t2q.indexOf("<ErrorMessage>") >= 0 && t2q.indexOf("progress") < 0) {
+          var m2q = t2q.match(/<ErrorMessage>([\s\S]*?)<\/ErrorMessage>/); return json({ ok: false, error: "GetStatement: " + (m2q ? m2q[1] : "?") });
+        }
+      }
+      if (!xq) return json({ ok: false, error: "rapport non prêt — réessayer dans une minute" });
+      var infoQ = ibkrStatementInfo(xq);
+      var posQ = ibkrParsePositions(xq);
+      return json({ ok: true, queryId: qid, releve: infoQ, positions: posQ.length,
+        verdict: (infoQ && infoQ.couvreAujourdhui)
+          ? "✅ Cette requête couvre la journée en cours : c'est celle à mettre dans IBKR_FLEX_QUERY_ID."
+          : "❌ Cette requête s'arrête au " + ((infoQ && infoQ.auISO) || "?") + " : elle ne verra pas les mouvements du jour." });
+    } catch (e) { return json({ ok: false, error: e.message }, 500); }
+  }
+
   if (path === "/ibkr_sync") {
     try { return json(await ibkrSyncPortfolio(url.searchParams.get("purge") === "1", url.searchParams.get("dry") === "1")); }
     catch (e) { return json({ ok: false, error: e.message }, 500); }
@@ -2435,7 +2468,7 @@ async function handleRequest(request) {
   // ── GET /read ─────────────────────────────────────────────────────────────
   if (path === "/read" && request.method === "GET") {
     const KEYS = [
-      "cgi_data","cgi_txns","cgi_dd","cgi_snapshots","cgi_gdbs","cgi_gc","cgi_gsb",
+      "cgi_data","cgi_txns","cgi_dd","cgi_snapshots","cgi_snap_tombstones","cgi_gdbs","cgi_gc","cgi_gsb",
       "cgi_cm","cgi_sm","cgi_tm",
       "cgi_portfolio","cgi_crypto","cgi_stocks","cgi_bank",
       "cgi_yfmap","cgi_icons","cgi_bench",
@@ -2480,13 +2513,13 @@ async function handleRequest(request) {
       var body2 = await request.text();
       var bases = JSON.parse(body2);
       var ALLOWED = [
-        "cgi_txns","cgi_dd","cgi_snapshots","cgi_gdbs","cgi_gc","cgi_gsb",
+        "cgi_txns","cgi_dd","cgi_snapshots","cgi_snap_tombstones","cgi_gdbs","cgi_gc","cgi_gsb",
         "cgi_cm","cgi_sm","cgi_tm",
         "cgi_portfolio","cgi_crypto","cgi_stocks","cgi_bank",
         "cgi_yfmap","cgi_icons","cgi_bench",
         "cgi_watchlist","cgi_inv","cgi_futures","cgi_ibkr_annex","cgi_fund_stats",
         "cgi_devices","cgi_pin","cgi_draws","cgi_alloc_targets","cgi_alloc_templates","cgi_cex_trades","cgi_manual_closed","cgi_pending_alerts","cgi_bank_moves","cgi_txns_tombstones",
-        "cgi_daily","cgi_theme",
+        "cgi_daily","cgi_theme","cgi_snap_tombstones",
       ];
       var written = [];
       var errors2 = [];
@@ -2509,6 +2542,34 @@ async function handleRequest(request) {
                 payload = Object.keys(byDay).sort().map(function (d) { return byDay[d]; });
                 if (payload.length > 1200) payload = payload.slice(-1200);
               } catch (eJ) {}
+            }
+            // #197 — cgi_snap_tombstones : UNION, jamais de remplacement. Un appareil qui n'a
+            // pas encore vu une suppression enverrait sinon une liste plus courte et
+            // ressusciterait le snapshot effacé ailleurs. On n'oublie jamais une suppression.
+            if (key === "cgi_snap_tombstones" && Array.isArray(payload)) {
+              try {
+                var tOld = await GDB_KV.get("cgi_snap_tombstones");
+                var tArr = tOld ? JSON.parse(tOld) : [];
+                if (!Array.isArray(tArr)) tArr = [];
+                var tSet = {};
+                tArr.concat(payload).forEach(function (d) { if (d != null) tSet[String(d)] = 1; });
+                payload = Object.keys(tSet).sort();
+                if (payload.length > 500) payload = payload.slice(-500);
+              } catch (eT) {}
+            }
+            // #197 — cgi_snapshots : on retire à l'écriture les dates supprimées. Sans ça, un
+            // appareil resté sur une ancienne liste les réécrirait au premier snapshot venu.
+            if (key === "cgi_snapshots" && Array.isArray(payload)) {
+              try {
+                var sTomb = await GDB_KV.get("cgi_snap_tombstones");
+                var sT = sTomb ? JSON.parse(sTomb) : [];
+                if (Array.isArray(sT) && sT.length) {
+                  var sSet = {}; sT.forEach(function (d) { sSet[String(d)] = 1; });
+                  var avant = payload.length;
+                  payload = payload.filter(function (x) { return !(x && sSet[String(x.d)]); });
+                  if (payload.length !== avant) written.push("cgi_snapshots:" + (avant - payload.length) + " supprimé(s) écarté(s)");
+                }
+              } catch (eS) {}
             }
             // #67g — cgi_txns : FUSION par id côté serveur, jamais de remplacement sec.
             // Un appareil dont les txns locales sont périmées ne peut plus effacer les
