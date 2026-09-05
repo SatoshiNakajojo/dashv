@@ -2538,7 +2538,16 @@ async function handleRequest(request) {
                 if (!Array.isArray(jArr)) jArr = [];
                 var byDay = {};
                 jArr.forEach(function (e) { if (e && e.d) byDay[e.d] = e; });
-                payload.forEach(function (e) { if (e && e.d) byDay[e.d] = e; });
+                // #199 — une entrée PROVISOIRE (p:1) est un état d'ouverture, enregistré avant que
+                // les prix aient été actualisés. Elle ne comble qu'un trou : elle ne doit jamais
+                // écraser une valeur fiable, sinon un appareil ouvert et refermé aussitôt
+                // réintroduirait le creux du jour chez tous les autres.
+                payload.forEach(function (e) {
+                  if (!e || !e.d) return;
+                  var ex = byDay[e.d];
+                  if (e.p && ex && !ex.p) return;   // provisoire vs fiable : on garde le fiable
+                  byDay[e.d] = e;
+                });
                 payload = Object.keys(byDay).sort().map(function (d) { return byDay[d]; });
                 if (payload.length > 1200) payload = payload.slice(-1200);
               } catch (eJ) {}
