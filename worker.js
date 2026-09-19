@@ -2502,9 +2502,11 @@ async function handleRequest(request) {
         var rS = {}; result.cgi_snap_tombstones.forEach(function (d) { if (d != null) rS[String(d)] = 1; });
         result.cgi_snapshots = result.cgi_snapshots.filter(function (x) { return !(x && rS[String(x.d)]); });
       }
-      if (Array.isArray(result.cgi_daily_tomb) && result.cgi_daily_tomb.length && Array.isArray(result.cgi_daily)) {
+      if (Array.isArray(result.cgi_daily_tomb) && result.cgi_daily_tomb.length) {
         var rD = {}; result.cgi_daily_tomb.forEach(function (d) { if (d != null) rD[String(d)] = 1; });
-        result.cgi_daily = result.cgi_daily.filter(function (x) { return !(x && rD[String(x.d)]); });
+        if (Array.isArray(result.cgi_daily)) result.cgi_daily = result.cgi_daily.filter(function (x) { return !(x && rD[String(x.d)]); });
+        // #201 — la série DD dessine « 1 an » et « depuis janv. » : même registre, même filtre.
+        if (Array.isArray(result.cgi_dd)) result.cgi_dd = result.cgi_dd.filter(function (r) { return !(Array.isArray(r) && rD[String(r[0])]); });
       }
     } catch (eF) {}
     return json(result);
@@ -2574,6 +2576,22 @@ async function handleRequest(request) {
                 payload = Object.keys(byDay).sort().map(function (d) { return byDay[d]; });
                 if (payload.length > 1200) payload = payload.slice(-1200);
               } catch (eJ) {}
+            }
+            // #201 — cgi_dd porte AUSSI une ligne par jour (colonne 2 = patrimoine total), et c'est
+            // elle que lit la courbe de l'Accueil sur « 1 an » et « depuis janv. ». Le registre des
+            // jours écartés vaut donc pour elle : sans ça, la ligne faussée revenait par le KV.
+            if (key === "cgi_dd" && Array.isArray(payload)) {
+              try {
+                var ddT = await GDB_KV.get("cgi_daily_tomb");
+                var ddL = ddT ? JSON.parse(ddT) : [];
+                if (Array.isArray(ddL) && ddL.length) {
+                  var ddKo = {};
+                  ddL.forEach(function (d) { if (d != null) ddKo[String(d)] = 1; });
+                  var ddAvant = payload.length;
+                  payload = payload.filter(function (r) { return !(Array.isArray(r) && ddKo[String(r[0])]); });
+                  if (payload.length !== ddAvant) written.push("cgi_dd:" + (ddAvant - payload.length) + " jour(s) écarté(s)");
+                }
+              } catch (eDD) {}
             }
             // #200 — cgi_daily_tomb : UNION, jamais de remplacement. Même raison que pour
             // les snapshots : un appareil qui n'a pas encore vu une suppression enverrait une
