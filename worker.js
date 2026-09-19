@@ -2478,6 +2478,9 @@ async function handleRequest(request) {
       // restait local, chaque appareil n'observait que les jours où il avait été
       // ouvert — et dessinait donc une courbe différente des autres.
       "cgi_daily",
+      // #200 — dates RETIRÉES du journal quotidien. Sans elles, la fusion par date
+      // ci-dessus ramènerait au prochain démarrage tout creux effacé sur un appareil.
+      "cgi_daily_tomb",
       // Thème : il suit l'utilisateur, pas l'appareil.
       "cgi_theme",
     ];
@@ -2492,6 +2495,18 @@ async function handleRequest(request) {
         result["_err_"+k] = e.message;
       }
     }
+    // #197/#200 — on n'expose jamais ce qui a été supprimé : un appareil qui lit le KV
+    // ne doit pas pouvoir réintroduire un snapshot ou un creux effacé ailleurs.
+    try {
+      if (Array.isArray(result.cgi_snap_tombstones) && result.cgi_snap_tombstones.length && Array.isArray(result.cgi_snapshots)) {
+        var rS = {}; result.cgi_snap_tombstones.forEach(function (d) { if (d != null) rS[String(d)] = 1; });
+        result.cgi_snapshots = result.cgi_snapshots.filter(function (x) { return !(x && rS[String(x.d)]); });
+      }
+      if (Array.isArray(result.cgi_daily_tomb) && result.cgi_daily_tomb.length && Array.isArray(result.cgi_daily)) {
+        var rD = {}; result.cgi_daily_tomb.forEach(function (d) { if (d != null) rD[String(d)] = 1; });
+        result.cgi_daily = result.cgi_daily.filter(function (x) { return !(x && rD[String(x.d)]); });
+      }
+    } catch (eF) {}
     return json(result);
   }
 
@@ -2519,7 +2534,7 @@ async function handleRequest(request) {
         "cgi_yfmap","cgi_icons","cgi_bench",
         "cgi_watchlist","cgi_inv","cgi_futures","cgi_ibkr_annex","cgi_fund_stats",
         "cgi_devices","cgi_pin","cgi_draws","cgi_alloc_targets","cgi_alloc_templates","cgi_cex_trades","cgi_manual_closed","cgi_pending_alerts","cgi_bank_moves","cgi_txns_tombstones",
-        "cgi_daily","cgi_theme","cgi_snap_tombstones",
+        "cgi_daily","cgi_daily_tomb","cgi_theme","cgi_snap_tombstones",
       ];
       var written = [];
       var errors2 = [];
@@ -2536,14 +2551,22 @@ async function handleRequest(request) {
                 var jOld = await GDB_KV.get("cgi_daily");
                 var jArr = jOld ? JSON.parse(jOld) : [];
                 if (!Array.isArray(jArr)) jArr = [];
+                // #200 — les dates retirées ne reviennent JAMAIS, ni par le KV ni par un
+                // appareil resté sur l'ancienne liste. C'est ce qui rend la suppression
+                // d'un creux durable : sans ça, la fusion par date la défaisait aussitôt.
+                var jTomb = await GDB_KV.get("cgi_daily_tomb");
+                var jT = jTomb ? JSON.parse(jTomb) : [];
+                var jDead = {};
+                if (Array.isArray(jT)) jT.forEach(function (d) { if (d != null) jDead[String(d)] = 1; });
                 var byDay = {};
-                jArr.forEach(function (e) { if (e && e.d) byDay[e.d] = e; });
+                jArr.forEach(function (e) { if (e && e.d && !jDead[String(e.d)]) byDay[e.d] = e; });
                 // #199 — une entrée PROVISOIRE (p:1) est un état d'ouverture, enregistré avant que
                 // les prix aient été actualisés. Elle ne comble qu'un trou : elle ne doit jamais
                 // écraser une valeur fiable, sinon un appareil ouvert et refermé aussitôt
                 // réintroduirait le creux du jour chez tous les autres.
                 payload.forEach(function (e) {
                   if (!e || !e.d) return;
+                  if (jDead[String(e.d)]) return;   // #200 — date retirée : on ne la réécrit pas
                   var ex = byDay[e.d];
                   if (e.p && ex && !ex.p) return;   // provisoire vs fiable : on garde le fiable
                   byDay[e.d] = e;
@@ -2551,6 +2574,20 @@ async function handleRequest(request) {
                 payload = Object.keys(byDay).sort().map(function (d) { return byDay[d]; });
                 if (payload.length > 1200) payload = payload.slice(-1200);
               } catch (eJ) {}
+            }
+            // #200 — cgi_daily_tomb : UNION, jamais de remplacement. Même raison que pour
+            // les snapshots : un appareil qui n'a pas encore vu une suppression enverrait une
+            // liste plus courte et ferait oublier l'effacement fait ailleurs.
+            if (key === "cgi_daily_tomb" && Array.isArray(payload)) {
+              try {
+                var dOld = await GDB_KV.get("cgi_daily_tomb");
+                var dArr = dOld ? JSON.parse(dOld) : [];
+                if (!Array.isArray(dArr)) dArr = [];
+                var dSet = {};
+                dArr.concat(payload).forEach(function (d) { if (d != null) dSet[String(d)] = 1; });
+                payload = Object.keys(dSet).sort();
+                if (payload.length > 500) payload = payload.slice(-500);
+              } catch (eD) {}
             }
             // #197 — cgi_snap_tombstones : UNION, jamais de remplacement. Un appareil qui n'a
             // pas encore vu une suppression enverrait sinon une liste plus courte et
